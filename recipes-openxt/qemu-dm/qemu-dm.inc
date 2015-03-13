@@ -4,7 +4,7 @@ LIC_FILES_CHKSUM = "file://COPYING;md5=441c28d2cf86e15a37fa47e15a72fbac  \
 DEPENDS = "xen-tools alsa-lib pciutils libpng blktap libxenacpi libv4v openssl zlib libcap-ng libdmbus"
 
 SRC_URI = "http://wiki.qemu-project.org/download/qemu-${PV}.tar.bz2 \
-            file://generic-xenstore-watch-callback-support.patch \
+            file://generic-xenstore-extensions.patch \
             file://static-fix.patch;patch=1 \
             file://ioreq-server-upstream.patch;patch=1 \
             file://ioreq-server.patch;patch=1 \
@@ -18,7 +18,6 @@ SRC_URI = "http://wiki.qemu-project.org/download/qemu-${PV}.tar.bz2 \
             file://audio-alsa.patch;patch=1 \
             file://xenmou.patch;patch=1 \
             file://audio-alsa-stub.patch;patch=1 \
-            file://atapi-pass-through.patch;patch=1 \
             file://vbe-xt-extensions.patch;patch=1 \
             file://vga-spinlock.patch;patch=1 \
             file://vga-shadow-bda.patch;patch=1 \
@@ -26,6 +25,7 @@ SRC_URI = "http://wiki.qemu-project.org/download/qemu-${PV}.tar.bz2 \
             file://audio-policy.patch;patch=1 \
             file://fix-surfman-coherency.patch;patch=1 \
             file://change-default-pixelformat.patch;patch=1 \
+            file://atapi-pass-through.patch;patch=1 \
             "
 
 SRC_URI[md5sum] = "78f13b774814b6b7ebcaf4f9b9204318"
