@@ -31,8 +31,8 @@ Signed-off-by: Chris Patterson <pattersonc@ainfosec.com>
 
 Index: qemu-1.4.0/block/Makefile.objs
 ===================================================================
---- qemu-1.4.0.orig/block/Makefile.objs	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/block/Makefile.objs	2015-03-13 17:08:28.833488318 -0400
+--- qemu-1.4.0.orig/block/Makefile.objs	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/block/Makefile.objs	2015-03-13 19:22:39.004971373 -0400
 @@ -6,6 +6,7 @@
  block-obj-$(CONFIG_WIN32) += raw-win32.o win32-aio.o
  block-obj-$(CONFIG_POSIX) += raw-posix.o
@@ -44,8 +44,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-13 17:20:24.717501179 -0400
-@@ -0,0 +1,1039 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-16 18:44:07.741794100 -0400
+@@ -0,0 +1,1085 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -181,7 +181,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        printf("try_to_get_exclusive_lock get_atapi_pt_lock=%d\n", lock_state);
 +    }
 +    free(tmp);
-+    return true;-
++    return true;
 +}
 +#endif
 +
@@ -238,8 +238,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        eject = 0;
 +    }
 +
++    printf("eject_req_cb: eject detected %s = %d\n", info->device_path, eject);
++
 +    if (eject) {
-+        printf("do_eject_req: ejecting %s\n", info->device_path);
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
 +#if 0
 +        /* queue media removed event */
@@ -265,9 +266,13 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        assign = 0;
 +    }
 +
++     printf("assign_req_cb: assign detected %s = %d\n", info->device_path,
++                                                           assign);
++
 +    if (assign) {
-+        printf("do_assign_req: assigning %s\n", info->device_path);
 +        bdrv_ioctl(info->bs, ATAPI_PT_GET_PHYS_LOCK, NULL);
++    } else {
++        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
 +    }
 +
 +    /* ack receipt of request */
@@ -279,27 +284,30 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +    bool autolock = read_autolock_policy(info);
 +
-+    if (autolock != info->autolock) {
-+        info->autolock = autolock;
-+        printf("autolock_cb: setting autolock policy to %d\n", autolock);
-+    }
++    printf("autolock_cb: autlock detected %s = %d\n", info->device_path,
++                                                             autolock);
++    info->autolock = autolock;
 +}
 +
 +static void glob_mediastate_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
-+    bool autolock = read_autolock_policy(info);
++    bool old_media_present = info->media_present;
++    bool media_present = get_glob_mediastate(info);
 +
-+    if (autolock != info->autolock) {
-+        info->autolock = autolock;
-+        printf("autolock_cb: setting autolock policy to %d\n", autolock);
++    printf("glob_mediastate_cb: media change detected %s = %d\n", info->device_path,
++                                                             media_present);
++
++    if (old_media_present != media_present) {
++        /* TODO: add some notifies? */
++        printf("glob_mediastate_cb: media state change detected %d\n", media_present);
 +    }
 +}
 +
 +static bool atapi_pt_device_info_init(AtapiPtDeviceInfo *info, const char *devpath, BlockDriverState *bs)
 +{
 +    char path[256];
-+    memset(info, sizeof(*info), 0);
++    memset(info, 0, sizeof(*info));
 +
 +    if (sscanf(devpath, "/dev/bsg/%d:%d:%d:%d", &info->device_addr_a,
 +                                                &info->device_addr_b,
@@ -335,26 +343,27 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    info->lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
 +
-+    info->autolock = read_autolock_policy(info);
-+
 +    info->bs = bs;
 +
 +    /* register xenstore watches */
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-eject", eject_req_cb, info)) {
-+        fprintf(stderr, "watch_req_init: failed to register watch for %p\n", path);
++        fprintf(stdout, "watch_req_init: failed to register watch for %p\n", path);
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-assign", assign_req_cb, info)) {
-+        fprintf(stderr, "watch_req_init: failed to register watch for %p\n", path);
++        fprintf(stdout, "watch_req_init: failed to register watch for %p\n", path);
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "autolock", autolock_cb, info)) {
-+        fprintf(stderr, "watch_req_init: failed to register watch for %p\n", path);
++        fprintf(stdout, "watch_req_init: failed to register watch for %p\n", path);
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_glob_base, "media", glob_mediastate_cb, info)) {
-+        fprintf(stderr, "watch_req_init: failed to register watch for %p\n", path);
++        fprintf(stdout, "watch_req_init: failed to register watch for %p\n", path);
 +    }
++
++    /* xenstore_add_watch will open xenstore handle so xenstore_read should be safe */
++    info->autolock = read_autolock_policy(info);
 +
 +    return true;
 +}
@@ -372,12 +381,12 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    /* open the shared memory */
 +    bdrvpts->shm_fd = shm_open(bdrvpts->shm_name, O_CREAT | O_RDWR, 0666);
 +    if (bdrvpts->shm_fd < 0) {
-+        fprintf(stderr, "shm_open() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "shm_open() failed (%s).\n", strerror(errno));
 +        goto pt_posix_init_shm_error;
 +    }
 +
 +    if (ftruncate(bdrvpts->shm_fd, sizeof(*(bdrvpts->shm))) == -1) {
-+        fprintf(stderr, "ftruncate() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "ftruncate() failed (%s).\n", strerror(errno));
 +        goto pt_posix_init_shm_error_unlink;
 +    }
 +
@@ -387,7 +396,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +             MAP_SHARED, bdrvpts->shm_fd, 0);
 +
 +    if (bdrvpts->shm == MAP_FAILED) {
-+        fprintf(stderr, "mmap() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "mmap() failed (%s).\n", strerror(errno));
 +        goto pt_posix_init_shm_error_unmap;
 +    }
 +
@@ -556,8 +565,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        fcntl(pts->lock_fd, F_GETLK, &lock);
 +
 +        if (lock.l_type == F_UNLCK) {
++            DPRINTF("detected as unlocked: %s\n", pts->dev_info.device_path);
 +            pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
 +        } else {
++            DPRINTF("detected as locked by other: %s\n", pts->dev_info.device_path);
 +            pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER;
 +        }
 +    }
@@ -575,8 +586,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    lock.l_len = 0;
 +
 +    if (fcntl(pts->lock_fd, F_SETLK, &lock) == 0) {
++        DPRINTF("locked by me: %s\n", pts->dev_info.device_path);
 +        pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_ME;
 +    } else {
++        DPRINTF("locked by other: %s\n", pts->dev_info.device_path);
 +        pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER;
 +    }
 +
@@ -594,6 +607,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    fcntl(pts->lock_fd, F_SETLK, &lock);
 +    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
++
++    DPRINTF("released lock: %s\n", pts->dev_info.device_path);
 +}
 +
 +static int pt_local_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
@@ -606,39 +621,63 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    switch(req) {
 +        case ATAPI_PT_SET_GLOB_MEDIA_STATE:
-+            info->media_present = *(bool *)buf;
++            if (buf) {
++                info->media_present = *(bool *)buf;
++            }
 +            set_glob_mediastate(info, info->media_present);
 +            DPRINTF("set_glob_mediastate=%d\n", info->media_present);
 +            if (info->media_present && info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +               pt_local_release_fcntl_lock(pts);
 +               notify_xs_lock_state(info, 0);
 +            }
++            break;
 +        case ATAPI_PT_GET_GLOB_MEDIA_STATE:
-+            *(bool *)buf = get_glob_mediastate(info);
++            if (buf) {
++                *(bool *)buf = get_glob_mediastate(info);
++            }
++            break;
 +        case ATAPI_PT_GET_PHYS_LOCK:
++            /* we must either have autolock - or directly assigned */
 +            pt_local_get_fcntl_lock(pts);
 +            notify_xs_lock_state(info, info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME);
++            if (buf) {
++                *(uint32_t *)buf = info->lock_state;
++            }
 +            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
++            break;
 +        case ATAPI_PT_GET_PHYS_LOCK_STATE:
 +            pt_local_get_fcntl_lock_state(pts);
-+            *(uint32_t *)buf = info->lock_state;
-+            //DPRINTF("ATAPI_PT_GET_PHYS_LOCK_STATE=%d\n", info->lock_state);
++            if (buf) {
++                *(uint32_t *)buf = info->lock_state;
++            }
++            DPRINTF("ATAPI_PT_GET_PHYS_LOCK_STATE=%d\n", info->lock_state);
++            break;
 +        case ATAPI_PT_RELEASE_PHYS_LOCK:
 +            if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +                pt_local_release_fcntl_lock(pts);
 +            }
 +            notify_xs_lock_state(info, 0);
 +            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++            break;
 +        case ATAPI_PT_IOCTL_SG_IO:
++            DPRINTF("ATAPI_PT_IOCTL_SG_IO: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_IO, buf);
 +            if (ret < 0) {
-+                fprintf(stderr, "ioctl() failed (%s).\n", strerror(errno));
++                fprintf(stdout, "ioctl() failed (%s).\n", strerror(errno));
++            } else {
++                ret = 0;
 +            }
++            break;
 +        case ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE:
++            DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_GET_RESERVED_SIZE, buf);
 +            if (ret < 0) {
-+                fprintf(stderr, "ioctl() failed (%s).\n", strerror(errno));
++                DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE failed: %s\n", strerror(errno));
++            } else {
++                DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE failed: %s\n", strerror(errno));
++                ret = 0;
 +            }
++            break;
 +        default:
 +            return -ENOTSUP;
 +    }
@@ -773,7 +812,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    DPRINTF("%s: Open v4v socket.", __FUNCTION__);
 +    pts->v4v_fd = v4v_socket(SOCK_DGRAM);
 +    if (pts->v4v_fd < 0) {
-+        fprintf(stderr, "v4v_socket() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "v4v_socket() failed (%s).\n", strerror(errno));
 +        return -1;
 +    }
 +
@@ -790,7 +829,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    if (v4v_bind(pts->v4v_fd, &pts->local_addr, 0)) {
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
-+        fprintf(stderr, "v4v_bind() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "v4v_bind() failed (%s).\n", strerror(errno));
 +        return -1;
 +    }
 +
@@ -803,7 +842,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    ret = v4v_sendto(pts->v4v_fd, io_buf, dev_name_len + 2, 0, &pts->remote_addr);
 +    if (ret != dev_name_len + 2) {
-+        fprintf(stderr, "v4v_sendto() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "v4v_sendto() failed (%s).\n", strerror(errno));
 +        v4v_close(pts->v4v_fd);
 +        return -1;
 +    }
@@ -811,7 +850,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    ret = v4v_recvfrom(pts->v4v_fd, io_buf, 4, 0, &pts->remote_addr);
 +    DPRINTF("%s: recv %c%c.", __FUNCTION__, io_buf[1], io_buf[2]);
 +    if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+        fprintf(stderr, "v4v_recvfrom() failed (%s).\n", strerror(errno));
++        fprintf(stdout, "v4v_recvfrom() failed (%s).\n", strerror(errno));
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return -1;
@@ -899,7 +938,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +                              "%c", ((p[i + j] < ' ')
 +                                     || (p[i + j] > 0x7e)) ? '.' : p[i + j]);
 +        }
-+        fprintf(stderr, "%s\n", buf);
++        fprintf(stdout, "%s\n", buf);
 +    }
 +}
 +#endif
@@ -1026,32 +1065,39 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +               pt_v4v_release_lock(pts);
 +               notify_xs_lock_state(info, 0);
 +            }
++            break;
 +        case ATAPI_PT_GET_GLOB_MEDIA_STATE:
 +            *(bool *)buf = get_glob_mediastate(info);
++            break;
 +        case ATAPI_PT_GET_PHYS_LOCK:
 +            pt_v4v_get_lock(pts);
 +            notify_xs_lock_state(info, info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME);
 +            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
++            break;
 +        case ATAPI_PT_GET_PHYS_LOCK_STATE:
 +            pt_v4v_get_lock_state(pts);
 +            *(uint32_t *)buf = info->lock_state;
 +            //DPRINTF("ATAPI_PT_GET_PHYS_LOCK_STATE=%d\n", info->lock_state);
++            break;
 +        case ATAPI_PT_RELEASE_PHYS_LOCK:
 +            if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +                pt_v4v_release_lock(pts);
 +            }
 +            notify_xs_lock_state(info, 0);
 +            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++            break;
 +        case ATAPI_PT_IOCTL_SG_IO:
 +            ret = pt_v4v_sg_ioctl(bs, SG_IO, buf);
 +            if (ret < 0) {
-+                fprintf(stderr, "SG_IO ioctl() failed: %s\n", info->device_path);
++                fprintf(stdout, "SG_IO ioctl() failed: %s\n", info->device_path);
 +            }
++            break;
 +        case ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE:
 +            ret = pt_v4v_sg_ioctl(bs, SG_GET_RESERVED_SIZE, buf);
 +            if (ret < 0) {
-+                fprintf(stderr, "SG_GET_RESERVED_SIZE ioctl() failed: %s\n", info->device_path);
++                fprintf(stdout, "SG_GET_RESERVED_SIZE ioctl() failed: %s\n", info->device_path);
 +            }
++            break;
 +        default:
 +            return -ENOTSUP;
 +    }
@@ -1087,8 +1133,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +block_init(bdrv_pt_init);
 Index: qemu-1.4.0/blockdev.c
 ===================================================================
---- qemu-1.4.0.orig/blockdev.c	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/blockdev.c	2015-03-13 17:10:27.817490456 -0400
+--- qemu-1.4.0.orig/blockdev.c	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/blockdev.c	2015-03-13 19:22:39.008971373 -0400
 @@ -33,6 +33,9 @@
      [IF_SD] = "sd",
      [IF_VIRTIO] = "virtio",
@@ -1145,8 +1191,8 @@ Index: qemu-1.4.0/blockdev.c
      case IF_FLOPPY:
 Index: qemu-1.4.0/configure
 ===================================================================
---- qemu-1.4.0.orig/configure	2015-03-13 17:08:28.805488318 -0400
-+++ qemu-1.4.0/configure	2015-03-13 17:08:28.833488318 -0400
+--- qemu-1.4.0.orig/configure	2015-03-13 19:22:38.436971363 -0400
++++ qemu-1.4.0/configure	2015-03-13 19:22:39.008971373 -0400
 @@ -228,6 +228,8 @@
  glusterfs=""
  surfman="no"
@@ -1197,8 +1243,8 @@ Index: qemu-1.4.0/configure
  fi
 Index: qemu-1.4.0/hw/ide/Makefile.objs
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/Makefile.objs	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/hw/ide/Makefile.objs	2015-03-13 17:08:28.833488318 -0400
+--- qemu-1.4.0.orig/hw/ide/Makefile.objs	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/hw/ide/Makefile.objs	2015-03-13 19:22:39.008971373 -0400
 @@ -8,3 +8,4 @@
  common-obj-$(CONFIG_IDE_VIA) += via.o
  common-obj-$(CONFIG_AHCI) += ahci.o
@@ -1206,8 +1252,8 @@ Index: qemu-1.4.0/hw/ide/Makefile.objs
 +common-obj-$(CONFIG_ATAPI_PT) += atapi_pt.o
 Index: qemu-1.4.0/hw/ide/atapi.c
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/atapi.c	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/hw/ide/atapi.c	2015-03-13 17:08:28.833488318 -0400
+--- qemu-1.4.0.orig/hw/ide/atapi.c	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/hw/ide/atapi.c	2015-03-13 19:22:39.008971373 -0400
 @@ -242,7 +242,10 @@
  }
  
@@ -1223,8 +1269,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-13 17:10:27.821490456 -0400
-@@ -0,0 +1,1600 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-16 18:44:07.741794100 -0400
+@@ -0,0 +1,1674 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1248,6 +1294,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +#include <sys/mman.h>
 +#include <scsi/sg.h>
 +
++#include "hw/scsi-defs.h"
 +#include "hw/ide/internal.h"
 +#include "atapi_pt.h"
 +#include "block/block.h"
@@ -1606,6 +1653,48 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    { 0x008000, 0x008000, "VENDOR SPECIFIC"},
 +    { 0x000000, 0x000000, "Unrecognised sense data"}
 +};
++
++static bool ptcmd_get_media_lock(BlockDriverState *bs)
++{
++    uint32_t lock_state;
++
++    bdrv_ioctl(bs, ATAPI_PT_GET_PHYS_LOCK, &lock_state);
++
++    if (lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        return true;
++    }
++
++    return false;
++}
++
++static void ptcmd_set_media_state_absent(BlockDriverState *bs)
++{
++    bool x = false;
++    bdrv_ioctl(bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
++}
++
++static void ptcmd_set_media_state_present(BlockDriverState *bs)
++{
++    bool x = true;
++    bdrv_ioctl(bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
++}
++
++static bool ptcmd_get_media_state_present(BlockDriverState *bs)
++{
++    bool x = true;
++    bdrv_ioctl(bs, ATAPI_PT_GET_GLOB_MEDIA_STATE, &x);
++    return x;
++}
++
++static bool ptcmd_do_sg_io(BlockDriverState *bs, void *buf)
++{
++    return bdrv_ioctl(bs, ATAPI_PT_IOCTL_SG_IO, buf);
++}
++
++static bool ptcmd_do_sg_get_reserved_size(BlockDriverState *bs, void *buf)
++{
++    return bdrv_ioctl(bs, ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE, buf);
++}
 +
 +static char const *atapi_sense_to_str(uint8_t const key,
 +                      uint8_t const asc, uint8_t const ascq)
@@ -1998,7 +2087,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        }
 +
 +        if (!r) {
-+            r = bdrv_ioctl(s->bs, ATAPI_PT_IOCTL_SG_IO, &cmd);
++            r = ptcmd_do_sg_io(s->bs, &cmd);
 +        }
 +        if (r) {
 +            as->result = r;
@@ -2073,6 +2162,81 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    qemu_thread_exit(NULL);
 +    return NULL;
 +}
++#if 0
++static void set_reply_no_change(IDEState *s)
++{
++  s->io_buffer[2] = 4;
++  s->io_buffer[4] = MEC_NO_CHANGE;
++  s->io_buffer[5] = MS_NO_CHANGE;
++  s->io_buffer[6] = 0;
++  s->io_buffer[7] = 0;
++}
++
++static void set_reply_status_media(IDEState *s, uint8_t *buf)
++{
++  uint8_t event_code, media_status;
++
++  media_status = MS_NO_CHANGE;
++  event_code   = MEC_NO_CHANGE;
++
++  if (s->atapi_pt.notify_eject_request) {
++    media_status = MS_TRAY_OPEN;
++    event_code = MEC_EJECT_REQUEST;
++    s->atapi_pt.notify_eject_request = false;
++  } else if (s->atapi_pt.notify_media_removed) {
++    media_status = MS_TRAY_OPEN;
++    event_code = MEC_MEDIA_REMOVE;
++    s->atapi_pt.notify_media_removed = false;
++  } else if (s->atapi_pt.notify_new_media) {
++    media_status = MS_MEDIA_PRESENT;
++    event_code = MEC_NEW_MEDIA;
++    s->atapi_pt.notify_new_media = false;
++  }
++
++  buf[2] = 4;
++  buf[4] = event_code;
++  buf[5] = media_status;
++  buf[6] = 0;
++  buf[7] = 0;
++  ATAPI_DPRINTF("[ATAPI] media status notification %d %d %d\n", 4, event_code, media_status);
++}
++#endif
++
++static void event_status_notification_complete(IDEState *s)
++{
++    uint8_t *b = s->io_buffer;
++    int ev_class = b[2];
++    int ev_code = b[4];
++    if (ev_class == 4 && ev_code == MEC_NEW_MEDIA) {
++        /* This is a "new media" message coming from actual drive */
++        ATAPI_DPRINTF("[ATAPI] new media detected\n");
++        ptcmd_set_media_state_present(s->bs);
++    }
++
++    if (ev_class == 4 && ev_code == MEC_MEDIA_REMOVAL) {
++        /* This is a "media removed" message coming from actual drive */
++        ATAPI_DPRINTF("[ATAPI] media removed\n");
++        ptcmd_set_media_state_absent(s->bs);
++    }
++
++    /* XXX: this ev_code check differs from orig q14 patch check for b[5]==2 */
++    if ((ev_class == 4 && ev_code == MEC_NO_CHANGE) ||
++        (b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0))
++    {
++        /* This is no change message, we spoof it with fabricated media events if needed */
++#if 0
++        set_reply_status_media(s, b);
++#endif
++        ATAPI_DPRINTF("[ATAPI] virtual event\n");
++    } else {
++        /* don't propagate real events */
++#if 0
++        set_reply_no_change(s);
++#endif
++        ATAPI_DPRINTF("[ATAPI] ignoring real event\n");
++    }
++}
++
 +
 +/* AIO Read handler:
 + * This function is call to receive message from the sgio_dispatch_fd.
@@ -2084,19 +2248,21 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    IDEState *s = (IDEState *) e->opaque;
 +    ATAPIPassThroughState *as = s->atapipts;
 +    uint32_t din_actual;
-+    uint32_t glob_media_state;
++    bool glob_media_present;
 +
 +    ATAPI_DPRINTF("event read!\n");
 +
 +    event_notifier_test_and_clear(&as->e_ret);
 +
-+    bdrv_ioctl(s->bs, ATAPI_PT_GET_GLOB_MEDIA_STATE, &glob_media_state);
++    glob_media_present = ptcmd_get_media_state_present(s->bs);
 +
 +    if (as->result) {
 +        if ((as->sense.sense_key == SENSE_NOT_READY) &&
 +            (as->sense.asc == ASC_MEDIUM_NOT_PRESENT)) {
-+            uint32_t x = MEDIA_ABSENT;
-+            bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
++            if (glob_media_present) {
++                ATAPI_DPRINTF("[ATAPI] sense no medium - media must be absent?\n");
++                ptcmd_set_media_state_absent(s->bs);
++            }
 +        }
 +        atapi_pt_error(s);
 +        return;
@@ -2108,72 +2274,15 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        (as->request[0] == GPCMD_READ_10) ||
 +        (as->request[0] == GPCMD_READ_12) ||
 +        (as->request[0] == GPCMD_READ_DISC_INFO)) {
-+        if (glob_media_state != MEDIA_PRESENT) {
-+            uint32_t x = MEDIA_PRESENT;
-+            bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
++        if (!glob_media_present) {
++            ATAPI_DPRINTF("[ATAPI] read command detected - media must be present?\n");
++            ptcmd_set_media_state_present(s->bs);
 +        }
 +    }
 +
 +    if (as->request[0] == GPCMD_GET_EVENT_STATUS_NOTIFICATION) {
-+        switch (s->io_buffer[4]) {
-+        case 2:    /* NEW MEDIA */
-+            if (s->io_buffer[2] == 4) {
-+                if (glob_media_state != MEDIA_PRESENT) {
-+                    uint32_t x = MEDIA_PRESENT;
-+                    bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
-+                }
-+            }
-+            break;
-+        case 3:    /* REMOVED MEDIA */
-+            if (s->io_buffer[2] == 4) {
-+                if (glob_media_state != MEDIA_ABSENT) {
-+                    uint32_t x = MEDIA_ABSENT;
-+                    bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
-+                }
-+            }
-+            break;
-+        case 0:    /* NO EVENT... but... */
-+            if ((s->io_buffer[2] == 4 && s->io_buffer[5] == 2) ||
-+                (!s->io_buffer[5] && !s->io_buffer[6]
-+                 && !s->io_buffer[7])) {
-+                /* This is a no activity message... We can hijack it if
-+                 * needed */
-+                printf("GPCMD_GET_EVENT_STATUS_NOTIFICATION: NO EVENT\n");
-+#if 0
-+                if ((glob_media_state != shm_mediastate) &&
-+                    (shm_mediastate != MEDIA_STATE_UNKNOWN)) {
-+                    glob_media_state = shm_mediastate;
-+                    switch (glob_media_state) {
-+                    case MEDIA_ABSENT:
-+                        /* May be an eject message that we havn't seen yet */
-+                        s->io_buffer[2] = 4;
-+                        s->io_buffer[4] = 3;
-+                        s->io_buffer[5] = 1;
-+                        s->io_buffer[6] = 0;
-+                        s->io_buffer[7] = 0;
-+                        bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &glob_media_state);
-+                        /* TODO: Try to release lock... */
-+                        break;
-+                    case MEDIA_PRESENT:
-+                        /* Check exclusivity here... */
-+                        s->io_buffer[2] = 4;
-+                        s->io_buffer[4] = 2;
-+                        s->io_buffer[5] = 2;
-+                        s->io_buffer[6] = 0;
-+                        s->io_buffer[7] = 0;
-+                        /* TODO: Try to lock... */
-+                        bdrv_ioctl(s->bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &glob_media_state);
-+                        break;
-+                    default:
-+                        break;
-+                    }
-+                }
-+#endif
-+            }
-+            break;
-+        default:
-+            break;
-+        }
++        ATAPI_DPRINTF("[ATAPI] event status notification command\n");
++        event_status_notification_complete(s);
 +    }
 +
 +    if (as->din_xfer_len == 0) {
@@ -2261,7 +2370,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +     * Find out the maximum block size the hardware supports. This is needed
 +     * for USB drives where it is 120kb (less than the normal 128kb for some
 +     * reason) */
-+    if (bdrv_ioctl(s->bs, ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE, &(as->max_xfer_len))) {
++    if (ptcmd_do_sg_get_reserved_size(s->bs, &(as->max_xfer_len))) {
 +        ATAPI_DPRINTF
 +            ("[%s] unable to send an IOCTL (GET_RESERVED_SIZE)",
 +             strerror(errno));
@@ -2644,6 +2753,17 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        }
 +    }
 +
++    if (!ptcmd_get_media_lock(s->bs)) {
++        ATAPI_DPRINTF("refusing command: 0x%02x (\e[0;32m%s\e[m) dma=%d"
++                          " timeout(%u)",
++                          cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
++                          s->atapipts->timeout);
++        atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
++                           ASC_INV_FIELD_IN_CMD_PACKET, 0,
++                           0x70);
++        return;
++    }
++
 +    ATAPI_DPRINTF("sending command: 0x%02x (\e[0;32m%s\e[m) dma=%d"
 +              " timeout(%u)",
 +              cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
@@ -2828,7 +2948,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.h
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.h	2015-03-13 17:08:28.833488318 -0400
++++ qemu-1.4.0/hw/ide/atapi_pt.h	2015-03-13 19:22:39.008971373 -0400
 @@ -0,0 +1,147 @@
 +/*
 + * ATAPI guest commands translation.
@@ -2979,8 +3099,8 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.h
 +#endif /* !ATAPI_PT_H_ */
 Index: qemu-1.4.0/hw/ide/core.c
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/core.c	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/hw/ide/core.c	2015-03-13 17:10:27.817490456 -0400
+--- qemu-1.4.0.orig/hw/ide/core.c	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/hw/ide/core.c	2015-03-13 19:22:39.012971373 -0400
 @@ -1399,8 +1399,13 @@
          s->status = READY_STAT | SEEK_STAT;
          s->atapi_dma = s->feature & 1;
@@ -3072,8 +3192,8 @@ Index: qemu-1.4.0/hw/ide/core.c
  static int transfer_end_table_idx(EndTransferFunc *fn)
 Index: qemu-1.4.0/hw/ide/internal.h
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/internal.h	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/hw/ide/internal.h	2015-03-13 17:10:27.821490456 -0400
+--- qemu-1.4.0.orig/hw/ide/internal.h	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/hw/ide/internal.h	2015-03-13 19:22:39.012971373 -0400
 @@ -316,7 +316,11 @@
  #define SMART_DISABLE         0xd9
  #define SMART_STATUS          0xda
@@ -3122,8 +3242,8 @@ Index: qemu-1.4.0/hw/ide/internal.h
  uint32_t ide_ioport_read(void *opaque, uint32_t addr1);
 Index: qemu-1.4.0/hw/ide/pci.c
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/pci.c	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/hw/ide/pci.c	2015-03-13 17:08:28.837488318 -0400
+--- qemu-1.4.0.orig/hw/ide/pci.c	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/hw/ide/pci.c	2015-03-13 19:22:39.012971373 -0400
 @@ -308,6 +308,10 @@
               * whole DMA operation will be submitted to disk with a single
               * aio operation with preadv/pwritev.
@@ -3137,8 +3257,8 @@ Index: qemu-1.4.0/hw/ide/pci.c
                  assert(bm->bus->dma->aiocb == NULL);
 Index: qemu-1.4.0/hw/ide/qdev.c
 ===================================================================
---- qemu-1.4.0.orig/hw/ide/qdev.c	2015-03-13 17:08:28.689488316 -0400
-+++ qemu-1.4.0/hw/ide/qdev.c	2015-03-13 17:08:28.837488318 -0400
+--- qemu-1.4.0.orig/hw/ide/qdev.c	2015-03-13 19:22:36.220971321 -0400
++++ qemu-1.4.0/hw/ide/qdev.c	2015-03-13 19:22:39.012971373 -0400
 @@ -105,7 +105,15 @@
  {
      DeviceState *dev;
@@ -3205,8 +3325,8 @@ Index: qemu-1.4.0/hw/ide/qdev.c
 Index: qemu-1.4.0/include/block/atapi_pt_state.h
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/include/block/atapi_pt_state.h	2015-03-13 17:10:27.817490456 -0400
-@@ -0,0 +1,47 @@
++++ qemu-1.4.0/include/block/atapi_pt_state.h	2015-03-16 18:44:07.741794100 -0400
+@@ -0,0 +1,53 @@
 +/*
 + * Copyright (C) 2014 Citrix Systems Ltd
 + *
@@ -3229,11 +3349,9 @@ Index: qemu-1.4.0/include/block/atapi_pt_state.h
 +#define _ATAPI_PT_H_
 +
 +typedef enum {
-+    MEDIA_STATE_UNKNOWN = 0x00,
++    MEDIA_ABSENT        = 0x00,
 +    MEDIA_PRESENT       = 0x01,
-+    MEDIA_ABSENT        = 0x02
 +} atapi_pt_media_state_t;
-+
 +
 +typedef enum {
 +    ATAPI_PT_OPEN                        = 0x00,
@@ -3253,11 +3371,19 @@ Index: qemu-1.4.0/include/block/atapi_pt_state.h
 +    ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER  = 0x02,
 +} atapi_pt_lock_state_t;
 +
++/*
++typedef struct {
++    uint32_t notify_eject_request:1;
++    uint32_t notify_media_removed:1;
++    uint32_t notify_new_media:1;
++    uint32_t reserved:29;
++} atapi_pt_notify_state_t;
++*/
 +#endif /* !_ATAPI_PT_H_ */
 Index: qemu-1.4.0/include/qemu/event_notifier.h
 ===================================================================
---- qemu-1.4.0.orig/include/qemu/event_notifier.h	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/include/qemu/event_notifier.h	2015-03-13 17:08:28.837488318 -0400
+--- qemu-1.4.0.orig/include/qemu/event_notifier.h	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/include/qemu/event_notifier.h	2015-03-13 19:22:39.012971373 -0400
 @@ -26,6 +26,10 @@
      int rfd;
      int wfd;
@@ -3279,8 +3405,8 @@ Index: qemu-1.4.0/include/qemu/event_notifier.h
  #endif
 Index: qemu-1.4.0/include/sysemu/blockdev.h
 ===================================================================
---- qemu-1.4.0.orig/include/sysemu/blockdev.h	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/include/sysemu/blockdev.h	2015-03-13 17:08:28.837488318 -0400
+--- qemu-1.4.0.orig/include/sysemu/blockdev.h	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/include/sysemu/blockdev.h	2015-03-13 19:22:39.012971373 -0400
 @@ -26,6 +26,9 @@
      IF_IDE = 0,
      IF_NONE,
@@ -3303,8 +3429,8 @@ Index: qemu-1.4.0/include/sysemu/blockdev.h
  DriveInfo *drive_get(BlockInterfaceType type, int bus, int unit);
 Index: qemu-1.4.0/util/event_notifier-posix.c
 ===================================================================
---- qemu-1.4.0.orig/util/event_notifier-posix.c	2015-03-13 17:04:21.465483875 -0400
-+++ qemu-1.4.0/util/event_notifier-posix.c	2015-03-13 17:08:28.837488318 -0400
+--- qemu-1.4.0.orig/util/event_notifier-posix.c	2013-02-15 18:05:35.000000000 -0500
++++ qemu-1.4.0/util/event_notifier-posix.c	2015-03-13 19:22:39.012971373 -0400
 @@ -119,3 +119,41 @@
  
      return value;
