@@ -44,8 +44,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-18 14:04:01.420722663 -0400
-@@ -0,0 +1,1133 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-18 18:25:29.333017181 -0400
+@@ -0,0 +1,1176 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -98,7 +98,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    char xenstore_domain_base[256];
 +    char xenstore_bsgdev_base[256];
 +    char xenstore_bsgdevreq_base[256];
-+    char xenstore_glob_base[256];
++    char xenstore_global_base[256];
 +
 +    int device_addr_a;
 +    int device_addr_b;
@@ -129,21 +129,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +                    __FUNCTION__, __LINE__, ##__VA_ARGS__);   \
 +    } while (0)
 +
-+#if 0
-+struct ATAPIShm {
-+    atapi_pt_media_state_t mediastate;
-+};
-+#endif
-+
 +typedef struct BDRVPosixPassThroughState {
 +    /* device descriptor */
 +    int fd;
 +    int open_flags;
-+
-+    /* shared memory descriptor */
-+    //int shm_fd;
-+    //char shm_name[1024];
-+    //struct ATAPIShm *volatile shm;
 +
 +    /* fcntl lock */
 +    int lock_fd;
@@ -152,8 +141,12 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo dev_info;
 +} BDRVPosixPassThroughState;
 +
-+/* report domain cd lock status through xenstore */
-+static void notify_xs_lock_state(AtapiPtDeviceInfo *info, int locked)
++/**
++ * Notify xenstore about local locking status.
++ * @param[in] info
++ * @param[in] locked: true if locking, false if unlocking
++ */
++static void notify_xs_lock_state(AtapiPtDeviceInfo *info, bool locked)
 +{
 +    /* write change */
 +    if (locked) {
@@ -174,11 +167,15 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +}
 +#endif
 +
++/**
++ * Xenstore callback for global media state.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void glob_mediastate_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +
-+    if (xenstore_read_int(info->xenstore_glob_base, "media", &info->media_state) != 0) {
++    if (xenstore_read_int(info->xenstore_global_base, "media", &info->media_state) != 0) {
 +        info->media_state = 0;
 +    }
 +
@@ -186,6 +183,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            info->device_path, info->media_state);
 +}
 +
++/**
++ * Xenstore callback for lock changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void lock_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
@@ -205,6 +206,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    }
 +}
 +
++/**
++ * Xenstore callback for autolock changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void autolock_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
@@ -217,6 +222,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +                                                             info->autolock);
 +}
 +
++/**
++ * Xenstore callback for switcher's have_focus changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void have_focus_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
@@ -230,6 +239,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            info->device_path, info->have_focus);
 +}
 +
++/**
++ * Xenstore callback for req-eject changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void eject_req_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
@@ -254,6 +267,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    xenstore_rm(info->xenstore_bsgdevreq_base, "req-eject");
 +}
 +
++/**
++ * Xenstore callback for req-assign changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
 +static void assign_req_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
@@ -284,8 +301,59 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    xenstore_rm(info->xenstore_bsgdevreq_base, "req-assign");
 +}
 +
++
++/**
++ * Checks to see if the device is in a lockable state (or already locked).
++ * @param[in] info
++ */
++static bool is_lockable(AtapiPtDeviceInfo *info)
++{
++    /* it is "lockable" if we currently have the lock */
++    if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        return true;
++    }
++
++    /* if autolock is disabled, lockable only if assigned */
++    if (!info->autolock && info->assigned) {
++        return true;
++    }
++
++    /* if autolock is enabled, lockable only if we have focus */
++    if (info->autolock && info->have_focus) {
++       return true;
++    }
++
++    return false;
++}
++
++/**
++ * Sets global media state, and releases lock if held and media is not present.
++ * @param[in] info
++ * @param[in] media_present: true if media is present, false otherwise
++ */
++static void set_global_media_state(AtapiPtDeviceInfo *info, bool media_present)
++{
++    info->media_state = media_present;
++
++    if (xenstore_write_int(info->xenstore_global_base, "media", info->media_state) != 0) {
++        DPRINTF("failed to set media state\n");
++    }
++
++    /* release lock if media ejected */
++    if (!media_present) {
++       bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
++    }
++}
++
++/**
++ * Set up AtapiPtDeviceInfo structure and init xenstore watches.
++ * @param[in] info
++ * @param[in] filename: device path (format=/dev/bsg/a:b:c:d)
++ * @param[in] bs
++ * @returns true if init OK, otherwise false.
++ */
 +static bool atapi_pt_device_info_init(AtapiPtDeviceInfo *info,
-+                                      const char *devpath, BlockDriverState *bs)
++                                      const char *filename, BlockDriverState *bs)
 +{
 +    char path[256];
 +
@@ -293,14 +361,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    info->bs = bs;
 +
-+    if (sscanf(devpath, "/dev/bsg/%d:%d:%d:%d", &info->device_addr_a,
++    if (sscanf(filename, "/dev/bsg/%d:%d:%d:%d", &info->device_addr_a,
 +                                                &info->device_addr_b,
 +                                                &info->device_addr_c,
 +                                                &info->device_addr_d) != 4) {
 +        return false;
 +    }
 +
-+    strncpy(info->device_path, devpath, sizeof(info->device_path));
++    strncpy(info->device_path, filename, sizeof(info->device_path));
 +
 +    snprintf(info->xenstore_domain_base, sizeof(info->xenstore_domain_base),
 +             "/local/domain/%d", xen_domid);
@@ -321,7 +389,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +             info->device_addr_c,
 +             info->device_addr_d);
 +
-+    snprintf(info->xenstore_glob_base, sizeof(info->xenstore_glob_base),
++    snprintf(info->xenstore_global_base, sizeof(info->xenstore_global_base),
 +             "/xenclient/bsgdev/%d_%d_%d_%d",
 +             info->device_addr_a,
 +             info->device_addr_b,
@@ -331,26 +399,32 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    /* register xenstore watches */
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-eject", eject_req_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-assign", assign_req_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "autolock", autolock_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_glob_base, "media", glob_mediastate_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_global_base, "media", glob_mediastate_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_bsgdev_base, "lock", lock_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
 +    if (!xenstore_add_watch(info->xenstore_domain_base, "switcher/have_focus", have_focus_cb, info)) {
 +        DPRINTF("watch_req_init: failed to register watch for %p\n", path);
++        return false;
 +    }
 +
 +    /* XXX: xenstore_add_watch() will open xenstore handle so xenstore_read should be safe */
@@ -358,7 +432,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        info->autolock = 0;
 +    }
 +
-+    if (xenstore_read_int(info->xenstore_glob_base, "media", &info->media_state) != 0) {
++    if (xenstore_read_int(info->xenstore_global_base, "media", &info->media_state) != 0) {
 +        info->media_state = 0;
 +    }
 +
@@ -373,70 +447,39 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return true;
 +}
 +
-+#if 0
-+static int pt_local_posix_open_shm(BDRVPosixPassThroughState *bdrvpts)
++/**
++ * Convert open flags appropriately for pt local device.
++ * @param[in] bdrv_flags: block driver flags from qemu
++ * @param[in] open_flags: device open flags
++ * @returns updated open flags
++ */
++static int pt_local_parse_open_flags(int bdrv_flags, int open_flags)
 +{
-+    snprintf(bdrvpts->shm_name, sizeof(bdrvpts->shm_name),
-+             "/xen-atapi-pt-status-%d_%d_%d_%d",
-+             bdrvpts->dev_info.device_addr_a,
-+             bdrvpts->dev_info.device_addr_b,
-+             bdrvpts->dev_info.device_addr_c,
-+             bdrvpts->dev_info.device_addr_d);
-+
-+    /* open the shared memory */
-+    bdrvpts->shm_fd = shm_open(bdrvpts->shm_name, O_CREAT | O_RDWR, 0666);
-+    if (bdrvpts->shm_fd < 0) {
-+        DPRINTF("shm_open() failed (%s).\n", strerror(errno));
-+        goto pt_posix_init_shm_error;
-+    }
-+
-+    if (ftruncate(bdrvpts->shm_fd, sizeof(*(bdrvpts->shm))) == -1) {
-+        DPRINTF("ftruncate() failed (%s).\n", strerror(errno));
-+        goto pt_posix_init_shm_error_unlink;
-+    }
-+
-+    /* map the shared memory */
-+    bdrvpts->shm =
-+        mmap(NULL, sizeof(*(bdrvpts->shm)), PROT_READ | PROT_WRITE,
-+             MAP_SHARED, bdrvpts->shm_fd, 0);
-+
-+    if (bdrvpts->shm == MAP_FAILED) {
-+        DPRINTF("mmap() failed (%s).\n", strerror(errno));
-+        goto pt_posix_init_shm_error_unmap;
-+    }
-+
-+    return 0;
-+
-+ pt_posix_init_shm_error_unmap:
-+    munmap(bdrvpts->shm, sizeof(*(bdrvpts->shm)));
-+ pt_posix_init_shm_error_unlink:
-+    shm_unlink(bdrvpts->shm_name);
-+ pt_posix_init_shm_error:
-+    return -1;
-+}
-+#endif
-+
-+/* ------------------------------------------------------------------------- */
-+
-+static void pt_local_parse_flags(int bdrv_flags, int *open_flags)
-+{
-+    assert(open_flags != NULL);
-+
-+    *open_flags |= O_BINARY;
-+    *open_flags &= ~O_ACCMODE;
++    open_flags |= O_BINARY;
++    open_flags &= ~O_ACCMODE;
 +    if (bdrv_flags & BDRV_O_RDWR) {
-+        *open_flags |= O_RDWR;
++        open_flags |= O_RDWR;
 +    } else {
-+        *open_flags |= O_RDONLY;
++        open_flags |= O_RDONLY;
 +    }
 +
 +    /* Use O_DSYNC for write-through caching, no flags for write-back caching,
 +     * and O_DIRECT for no caching. */
 +    if ((bdrv_flags & BDRV_O_NOCACHE)) {
-+        *open_flags |= O_DIRECT;
++        open_flags |= O_DIRECT;
 +    }
++
++    return open_flags;
 +}
 +
++/**
++ * If protocol matches, opens local device.
++ * @param[in] bs
++ * @param[in] filename: device path (e.g. /dev/bsg/a:b:c:d)
++ * @param[in] bdrv_flags: block driver flags from qemu
++ * @param[in] flags: device open flags
++ * @returns 0 if opened successfully, -1 otherwise
++ */
 +static int pt_local_open_device(BlockDriverState *bs, const char *filename,
 +                       int bdrv_flags, int open_flags)
 +{
@@ -446,7 +489,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    DPRINTF("opening %s\n", filename);
 +
 +    s->open_flags = open_flags;
-+    pt_local_parse_flags(bdrv_flags, &s->open_flags);
++    s->open_flags = pt_local_parse_open_flags(bdrv_flags, s->open_flags);
 +
 +    s->fd = -1;
 +    fd = qemu_open(filename, s->open_flags, 0644);
@@ -465,6 +508,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return 0;
 +}
 +
++/**
++ * Close device descriptor and cleanup.
++ * @param[in] bs
++ */
 +static void pt_local_close(BlockDriverState * bs)
 +{
 +    BDRVPosixPassThroughState *s = bs->opaque;
@@ -477,10 +524,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    }
 +}
 +
++/**
++ * Probes device and matches if it looks to be a valid atapi-pt-local.
++ * @param[in] filename: format "atapi-pt-local:/dev/bsg/a:b:c:d"
++ * @returns 0 if invalid, 100 if valid (probe priority)
++ */
 +static int pt_local_probe_device(const char *filename)
 +{
 +    int fd;
-+    int prio = 0;
 +    struct stat st;
 +
 +    /* check protocol */
@@ -514,16 +565,24 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    }
 +
 +    /* Attempt to detect via a CDROM specific ioctl */
-+    if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) >= 0) {
-+        DPRINTF("raising priority %s\n", filename);
-+        prio = 100;
++    if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) < 0) {
++        DPRINTF("CDROM_DRIVE_STATUS failed path = %s\n", filename);
++        qemu_close(fd);
++        return 0;
 +    }
 +
-+    DPRINTF("pt probe: path = %s priority = %d\n", filename, prio);
++    DPRINTF("CDROM_DRIVE_STATUS ok %s\n", filename);
 +    qemu_close(fd);
-+    return prio;
++    return 100;
 +}
 +
++/**
++ * If protocol matches, opens local device and lock file.
++ * @param[in] bs
++ * @param[in] filename: format "atapi-pt-local:/dev/bsg/a:b:c:d"
++ * @param[in] flags: device open flags
++ * @returns 0 if opened successfully, -1 otherwise
++ */
 +static int pt_local_open(BlockDriverState * bs, const char *filename, int flags)
 +{
 +    BDRVPosixPassThroughState *pts = bs->opaque;
@@ -556,36 +615,24 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return 0;
 +}
 +
-+#if 0
-+static int pt_local_get_fcntl_lock_state(BDRVPosixPassThroughState *pts)
++/**
++ * Grabs global exclusive lock.
++ * @param[in] pts
++ * @returns 1 if lock held, 0 otherwise
++ */
++static int pt_local_acquire_global_lock(BDRVPosixPassThroughState *pts)
 +{
 +    struct flock lock = {0};
 +
-+    /* if we don't have lock - check current status */
-+    if (pts->dev_info.lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+        lock.l_type = F_WRLCK;
-+        lock.l_whence = SEEK_SET;
-+        lock.l_start = 0;
-+        lock.l_len = 0;
-+
-+        fcntl(pts->lock_fd, F_GETLK, &lock);
-+
-+        if (lock.l_type == F_UNLCK) {
-+            DPRINTF("detected as unlocked: %s\n", pts->dev_info.device_path);
-+            pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
-+        } else {
-+            DPRINTF("detected as locked by other: %s\n", pts->dev_info.device_path);
-+            pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER;
-+        }
++    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        /* already have lock */
++        return 1;
 +    }
 +
-+    return pts->dev_info.lock_state;
-+}
-+#endif
-+
-+static int pt_local_get_fcntl_lock(BDRVPosixPassThroughState *pts)
-+{
-+    struct flock lock = {0};
++    if (!is_lockable(&pts->dev_info)) {
++        /* currently not allowed to lock - do not attempt */
++        return 0;
++    }
 +
 +    lock.l_type = F_WRLCK;
 +    lock.l_whence = SEEK_SET;
@@ -596,18 +643,27 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        DPRINTF("locked by me: %s\n", pts->dev_info.device_path);
 +        pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_ME;
 +        notify_xs_lock_state(&pts->dev_info, 1);
-+    } else {
-+        DPRINTF("locked by other: %s\n", pts->dev_info.device_path);
-+        pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER;
-+        notify_xs_lock_state(&pts->dev_info, 0);
++        return 1;
 +    }
 +
-+    return pts->dev_info.lock_state;
++    DPRINTF("locked by other: %s\n", pts->dev_info.device_path);
++    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER;
++    notify_xs_lock_state(&pts->dev_info, 0);
++    return 0;
 +}
 +
-+static void pt_local_release_fcntl_lock(BDRVPosixPassThroughState *pts)
++/**
++ * Releases global exclusive lock.
++ * @param[in] pts
++ */
++static void pt_local_release_global_lock(BDRVPosixPassThroughState *pts)
 +{
 +    struct flock lock = {0};
++
++    if (pts->dev_info.lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        /* we don't have the lock, nothing to do */
++        return;
++    }
 +
 +    lock.l_type = F_UNLCK;
 +    lock.l_whence = SEEK_SET;
@@ -623,90 +679,51 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    DPRINTF("released lock: %s\n", pts->dev_info.device_path);
 +}
 +
-+static bool pt_local_grab_lock(BDRVPosixPassThroughState *pts)
-+{
-+    AtapiPtDeviceInfo *info = &pts->dev_info;
-+
-+    /* do we already have lock? */
-+    if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+        return true;
-+    }
-+
-+    /* autolock is not enabled, assignment may only happen through req-assign */
-+    if (!info->autolock) {
-+        if (info->assigned) {
-+            /* we have assignment - try to grab the lock */
-+            pt_local_get_fcntl_lock(pts);
-+            if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+                return true;
-+            }
-+        }
-+        /* no assignment or grab failed */
-+        return false;
-+    }
-+
-+    /* autolock is enabled - check to see if we have focus and lock is available */
-+    if (info->have_focus) {
-+        DPRINTF("autolock+have_focus=attempting lock: %s\n", pts->dev_info.device_path);
-+        pt_local_get_fcntl_lock(pts);
-+        if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+            return true;
-+        }
-+    }
-+
-+    return false;
-+}
-+
++/**
++ * Handles "ioctls" from atapi pt driver for atapi-pt-local devices.
++ * @param[in] bs
++ * @param[in] req: ioctl command from atapi_pt_cmd_t enum
++ * @param[inout] buf: pointer to in/out data
++ * Returns: 0 on success, non-zero on failure.
++ */
 +static int pt_local_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
 +{
 +    BDRVPosixPassThroughState *pts = bs->opaque;
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
 +    int ret = 0;
 +
-+    DPRINTF("XXX bs=%p req=%ld buf=%p\n", bs, req, buf);
-+
 +    switch(req) {
 +        case ATAPI_PT_SET_GLOB_MEDIA_STATE:
-+            if (buf) {
-+                info->media_state = *(bool *)buf;
++            DPRINTF("ATAPI_PT_SET_GLOB_MEDIA_STATE: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
 +            }
-+            if (xenstore_write_int(info->xenstore_glob_base, "media", info->media_state) != 0) {
-+                printf("failed to set media state\n");
-+            }
-+            if (info->media_state && info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+               pt_local_release_fcntl_lock(pts);
-+            }
++            set_global_media_state(info, (*(uint32_t *)buf) ? true : false);
 +            break;
 +        case ATAPI_PT_GET_GLOB_MEDIA_STATE:
-+            if (buf) {
-+                *(bool *)buf = info->media_state ? true : false;
++            DPRINTF("ATAPI_PT_GET_GLOB_MEDIA_STATE: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
 +            }
++            *(uint32_t *)buf = info->media_state ? true : false;
 +            break;
 +        case ATAPI_PT_GET_PHYS_LOCK:
-+            pt_local_grab_lock(pts);
-+            if (buf) {
-+                *(uint32_t *)buf = info->lock_state;
++            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
 +            }
-+            DPRINTF("XXX ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
-+            break;
-+        case ATAPI_PT_GET_PHYS_LOCK_STATE:
-+            //pt_local_get_fcntl_lock_state(pts);
-+            if (buf) {
-+                *(uint32_t *)buf = info->lock_state;
-+            }
-+            DPRINTF("ATAPI_PT_GET_PHYS_LOCK_STATE=%d\n", info->lock_state);
++            pt_local_acquire_global_lock(pts);
++            *(uint32_t *)buf = info->lock_state;
 +            break;
 +        case ATAPI_PT_RELEASE_PHYS_LOCK:
-+            if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+                pt_local_release_fcntl_lock(pts);
-+            }
 +            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++            pt_local_release_global_lock(pts);
 +            break;
 +        case ATAPI_PT_IOCTL_SG_IO:
 +            DPRINTF("ATAPI_PT_IOCTL_SG_IO: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_IO, buf);
 +            if (ret < 0) {
-+                DPRINTF("ioctl() failed (%s).\n", strerror(errno));
++                DPRINTF("SG_IO ioctl() failed (%s).\n", strerror(errno));
 +            } else {
 +                ret = 0;
 +            }
@@ -715,17 +732,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_GET_RESERVED_SIZE, buf);
 +            if (ret < 0) {
-+                DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE failed: %s\n", strerror(errno));
++                DPRINTF("SG_GET_RESERVED_SIZE ioctl() failed: %s\n", strerror(errno));
 +            } else {
-+                DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE success: %d\n", ret);
 +                ret = 0;
 +            }
 +            break;
 +        default:
 +            return -ENOTSUP;
 +    }
-+
-+    DPRINTF("XXX completed bs=%p req=%ld buf=%p\n", bs, req, buf);
 +
 +    return ret;
 +}
@@ -763,90 +777,28 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo dev_info;
 +} BDRVStubdomPassThroughState;
 +
-+#if 0
-+static int pt_v4v_get_lock_state(BDRVStubdomPassThroughState *pts)
-+{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+
-+    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+       return ATAPI_PT_LOCK_STATE_LOCKED_BY_ME;
-+    }
-+
-+    io_buf[0] = ATAPI_PT_GET_PHYS_LOCK_STATE;
-+    io_buf[1] = pts->dev_id;
-+    v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr);
-+    v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0, &pts->remote_addr);
-+    pts->dev_info.lock_state = io_buf[1];
-+
-+    printf("pt_v4v_get_lock_state = %s %d\n", pts->dev_info.device_path, pts->dev_info.lock_state);
-+    return pts->dev_info.lock_state;
-+}
-+#endif
-+
-+static int pt_v4v_get_lock(BDRVStubdomPassThroughState *pts)
-+{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+
-+    if (pts->dev_info.lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+           io_buf[0] = ATAPI_PT_GET_PHYS_LOCK;
-+           io_buf[1] = pts->dev_id;
-+           v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr);
-+           v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0, &pts->remote_addr);
-+           pts->dev_info.lock_state = io_buf[1];
-+    }
-+
-+    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+        notify_xs_lock_state(&pts->dev_info, 1);
-+    } else {
-+        /* needed? */
-+        notify_xs_lock_state(&pts->dev_info, 0);
-+    }
-+    return pts->dev_info.lock_state;
-+}
-+
-+static void pt_v4v_release_lock(BDRVStubdomPassThroughState *pts)
-+{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+
-+    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+       io_buf[0] = ATAPI_PT_RELEASE_PHYS_LOCK;
-+       io_buf[1] = pts->dev_id;
-+       v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr);
-+    }
-+
-+    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
-+    notify_xs_lock_state(&pts->dev_info, 0);
-+}
-+
-+static int pt_v4v_close_common(BDRVStubdomPassThroughState *pts)
-+{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+
-+    if (pts->v4v_fd == -1) {
-+        DPRINTF("%s: v4v connection not initialized.", __FUNCTION__);
-+        return -1;
-+    }
-+
-+    io_buf[0] = ATAPI_PT_CLOSE;
-+    io_buf[1] = pts->dev_id;
-+    DPRINTF("%s: send ATAPI_PT_CLOSE through v4v.", __FUNCTION__);
-+    v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr);
-+
-+    v4v_close(pts->v4v_fd);
-+    pts->v4v_fd = -1;
-+    return 0;
-+}
-+
++/**
++ * Close v4v device descriptor.
++ * @param[in] bs
++ */
 +static void pt_v4v_close(BlockDriverState* bs)
 +{
 +    BDRVStubdomPassThroughState* pts = bs->opaque;
 +
-+    if (pt_v4v_close_common(pts) == -1) {
-+        DPRINTF("%s: Could not close v4v connection for \"%s\".",
-+                __FUNCTION__, bs->filename);
++    if (pts->v4v_fd == -1) {
++        DPRINTF("v4v connection not initialized.");
 +    }
++
++    v4v_close(pts->v4v_fd);
++    pts->v4v_fd = -1;
 +}
 +
++/**
++ * Open v4v descriptor for atapi-pt-v4v device.
++ * @param[in] pts
++ * @param[in] filename: dom0 device path e.g. /dev/bsg/a:b:c:d
++ * Returns: 0 on success, -1 on failure
++ */
 +static int pt_v4v_open_common(BDRVStubdomPassThroughState *pts, const char *filename)
 +{
 +    uint8_t io_buf[MAX_V4V_MSG_SIZE];
@@ -889,11 +841,18 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    if (ret != dev_name_len + 2) {
 +        DPRINTF("v4v_sendto() failed (%s).\n", strerror(errno));
 +        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
 +        return -1;
 +    }
 +
-+    ret = v4v_recvfrom(pts->v4v_fd, io_buf, 4, 0, &pts->remote_addr);
-+    DPRINTF("%s: recv %c%c.", __FUNCTION__, io_buf[1], io_buf[2]);
++    if (v4v_recvfrom(pts->v4v_fd, io_buf, 4, 0, &pts->remote_addr) != 4) {
++        DPRINTF("v4v_recvfrom() failed (%s).\n", strerror(errno));
++        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
++        return -1;
++    }
++
++    DPRINTF("recv %c%c.", io_buf[1], io_buf[2]);
 +    if (io_buf[1] != 'o' || io_buf[2] != 'k') {
 +        DPRINTF("v4v_recvfrom() failed (%s).\n", strerror(errno));
 +        v4v_close(pts->v4v_fd);
@@ -905,6 +864,13 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return 0;
 +}
 +
++/**
++ * If protocol matches, opens v4v passthrough device to atapi-dm-helper.
++ * @param[in] bs
++ * @param[in] filename: format "atapi-pt-v4v:/dev/bsg/a:b:c:d"
++ * @param[in] flags: device open flags
++ * @returns 0 if opened successfully, -1 otherwise
++ */
 +static int pt_v4v_open(BlockDriverState *bs, const char *filename, int flags)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
@@ -925,75 +891,118 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return pt_v4v_open_common(pts, filename);
 +}
 +
++/**
++ * Probes device and matches if it looks to be a valid atapi-pt-v4v.
++ * @param[in] filename: format "atapi-pt-local:/dev/bsg/a:b:c:d"
++ * @returns 0 if invalid, 100 if valid (probe priority)
++ */
 +static int pt_v4v_probe_device(const char *filename)
 +{
 +    BDRVStubdomPassThroughState pts;
-+    int ret;
-+    int prio = 0;
 +
 +    memset(&pts, 0, sizeof(BDRVStubdomPassThroughState));
 +
 +    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-v4v:", strlen("atapi-pt-v4v:")) != 0) {
 +        DPRINTF("pt_v4v_probe_device: not a pt local %s\n", filename);
-+        return -1;
++        return 0;
 +    }
 +
 +    /* skip past protocol */
 +    filename += strlen("atapi-pt-v4v:");
 +
-+    ret = pt_v4v_open_common(&pts, filename);
-+    if (ret == -1) {
++    /* try to open v4v device given filename */
++    if (pt_v4v_open_common(&pts, filename) == -1) {
 +        DPRINTF("%s: Cannot open \"%s\".", __FUNCTION__, filename);
-+        goto out;
++        return 0;
 +    }
 +
-+    ret = pt_v4v_close_common(&pts);
-+    if (ret == -1) {
-+        DPRINTF("%s: Cannot close \"%s\".", __FUNCTION__, filename);
-+        goto out;
-+    }
-+
-+    prio = 100;
-+    DPRINTF("probe device \"%s\" with prio %d", filename, prio);
-+ out:
-+    return prio;
++    v4v_close(pts.v4v_fd);
++    DPRINTF("v4v probe device ok: %s", filename);
++    return 100;
 +}
 +
-+#if 0
-+static void dump_hex(uint8_t * p, size_t len)
++
++/**
++ * Grabs global exclusive lock.
++ * @param[in] pts
++ * @returns 1 if lock held, 0 otherwise
++ */
++static int pt_v4v_acquire_global_lock(BDRVStubdomPassThroughState *pts)
 +{
-+    int i, j;
-+    char buf[80];
-+    int index;
++    uint8_t io_buf[MAX_V4V_MSG_SIZE];
 +
-+    for (i = 0; i < len; i += 16) {
-+        memset(buf, 0, sizeof(buf));
-+        index = 0;
-+        for (j = 0; (j < 16) && ((i + j) < len); j++) {
-+            index +=
-+                snprintf(&buf[index], sizeof(buf) - index, "%02x ", p[i + j]);
-+        }
-+        for (; j < 16; j++) {
-+            index += snprintf(&buf[index], sizeof(buf) - index, "   ");
-+        }
-+        index += snprintf(&buf[index], sizeof(buf) - index, " ");
-+        for (j = 0; (j < 16) && ((i + j) < len); j++) {
-+            index += snprintf(&buf[index], sizeof(buf) - index,
-+                              "%c", ((p[i + j] < ' ')
-+                                     || (p[i + j] > 0x7e)) ? '.' : p[i + j]);
-+        }
-+        DPRINTF("%s\n", buf);
++    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        /* already have lock */
++        return 1;
 +    }
++
++    if (!is_lockable(&pts->dev_info)) {
++        /* currently not allowed to lock - do not attempt */
++        return 0;
++    }
++
++    io_buf[0] = ATAPI_PT_GET_PHYS_LOCK;
++    io_buf[1] = pts->dev_id;
++
++    if (v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr) != 2) {
++        DPRINTF("v4v_sendto failed!\n");
++        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
++        return 0;
++    }
++
++    /* TODO: validate receive length */
++    v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0, &pts->remote_addr);
++    pts->dev_info.lock_state = io_buf[1];
++
++    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        notify_xs_lock_state(&pts->dev_info, 1);
++        return 1;
++    }
++
++    notify_xs_lock_state(&pts->dev_info, 0);
++    return 0;
 +}
-+#endif
 +
++/**
++ * Releases global exclusive lock.
++ * @param[in] pts
++ */
++static void pt_v4v_release_global_lock(BDRVStubdomPassThroughState *pts)
++{
++    uint8_t io_buf[MAX_V4V_MSG_SIZE];
 +
-+static int pt_v4v_sg_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
++    if (pts->dev_info.lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++        /* we don't have the lock, nothing to do */
++        return;
++    }
++
++    io_buf[0] = ATAPI_PT_RELEASE_PHYS_LOCK;
++    io_buf[1] = pts->dev_id;
++
++    if (v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr) != 2) {
++        DPRINTF("v4v_sendto failed!\n");
++        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
++        return;
++    }
++
++    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
++    notify_xs_lock_state(&pts->dev_info, 0);
++}
++
++/**
++ * Handles pass-through ioctls from atapi pt driver for atapi-pt-v4v devices
++ * @param[in] bs
++ * @param[in] req: sg ioctl command
++ * @param[inout] buf: pointer to in/out data
++ * Returns: 0 on success, non-zero on failure.
++ */
++static int pt_v4v_sg_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
 +    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+    int ret = -1;
 +    int len;
 +
 +    struct sg_io_v4 *cmd;
@@ -1004,8 +1013,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    uint8_t *copy_of_cmd_din_xferp = NULL;
 +
 +    if (pts->v4v_fd == -1) {
-+        DPRINTF("%s: v4v connection not initialized.", __FUNCTION__);
-+        goto exit;
++        DPRINTF("v4v connection not initialized.");
++        return -1;
 +    }
 +
 +    io_buf[0] = ATAPI_PT_IOCTL_SG_IO;
@@ -1019,21 +1028,32 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    switch (req) {
 +    case SG_GET_RESERVED_SIZE:
-+        DPRINTF("%s: send ATAPI_PT_IOCTL(%#lx) through v4v.",
-+                __FUNCTION__, req);
-+        v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr);
-+
-+        len = v4v_recvfrom(pts->v4v_fd, io_buf, len + 1, 0, &pts->remote_addr);
-+        DPRINTF("%s: recv %c%c.", __FUNCTION__, io_buf[1], io_buf[2]);
-+        if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+            v4v_close(pts->v4v_fd);
-+            pts->v4v_fd = -1;
-+            goto exit;
++        DPRINTF("send SG_GET_RESERVED_SIZE through v4v\n");
++        if (v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
++            DPRINTF("ERROR: v4v_sendto failed send!\n");
++            pt_v4v_close(bs);
++            return -1;
 +        }
 +
++        /* TODO: document me */
++        len = 7;
++
++        if (v4v_recvfrom(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
++            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
++            pt_v4v_close(bs);
++            return -1;
++        }
++
++        DPRINTF("v4v recv %c%c\n", io_buf[1], io_buf[2]);
++
++        if (io_buf[1] != 'o' || io_buf[2] != 'k') {
++            pt_v4v_close(bs);
++            return -1;
++        }
 +        memcpy(buf, &io_buf[3], sizeof(uint32_t));
 +        break;
 +    case SG_IO:
++        DPRINTF("send SG_IO through v4v\n");
 +        sg_buf = &io_buf[len];
 +
 +        cmd = (struct sg_io_v4 *)buf;
@@ -1059,100 +1079,123 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            copy_of_cmd_din_xferp = (uint8_t *) (uintptr_t) cmd->din_xferp;
 +        }
 +
-+        DPRINTF("%s: send ATAPI_CMD(%#02x) through v4v.", __FUNCTION__,
-+                *(uint8_t *) (uintptr_t) cmd->request);
-+        v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr);
++        DPRINTF("v4v send cmd: 0x%#02x", *(uint8_t *) (uintptr_t) cmd->request);
 +
-+        len =
-+            v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0,
-+                         &pts->remote_addr);
-+        DPRINTF("%s: recv %c%c.", __FUNCTION__, io_buf[1], io_buf[2]);
++        if (v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
++            pt_v4v_close(bs);
++            return -1;
++        }
++
++        len = v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0,
++                           &pts->remote_addr);
++
++        /* TODO: document packet structure */
++        if (len < 6 + sizeof(struct sg_io_v4)) {
++            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
++            pt_v4v_close(bs);
++            return -1;
++        }
++
++        DPRINTF("v4v recv %c%c.", io_buf[1], io_buf[2]);
 +        if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+            v4v_close(pts->v4v_fd);
-+            pts->v4v_fd = -1;
-+            ret = -1;
-+            goto exit;
++            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
++            pt_v4v_close(bs);
++            return -1;
 +        }
 +
 +        sg_buf = &io_buf[6];
++
++        /* copy sg_io_v4 struct back out */
 +        memcpy(cmd, sg_buf, sizeof(struct sg_io_v4));
 +        sg_buf += sizeof(struct sg_io_v4);
 +
++        /* copy sense data back out after checking new expected minimum len */
++        if (len < sizeof(struct sg_io_v4) + cmd->max_response_len) {
++            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
++            pt_v4v_close(bs);
++            return -1;
++        }
 +        memcpy((uint8_t *) sense, sg_buf, cmd->max_response_len);
 +        sg_buf += cmd->max_response_len;
++
 +        if (!is_dout) {
++            /* copy din_xferp data back out after checking new minimum len */
++            if (len < sizeof(struct sg_io_v4) + cmd->max_response_len + current_transfer_len) {
++                DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
++                pt_v4v_close(bs);
++                return -1;
++            }
 +            memcpy(copy_of_cmd_din_xferp, sg_buf, current_transfer_len);
 +            sg_buf += current_transfer_len;
 +        }
 +        break;
 +    default:
-+        DPRINTF("%s: ioctl(%#08lx) not handled for pass-through.",
-+                __FUNCTION__, req);
-+        goto exit;
++        DPRINTF("ioctl (0x%#08lx) not handled for pass-through.", req);
++        return -ENOTSUP;
 +    }
 +
-+    ret = 0;
-+ exit:
-+    return ret;
++    return 0;
 +}
 +
++/**
++ * Handles "ioctls" from atapi pt driver for atapi-pt-v4v devices.
++ * @param[in] bs
++ * @param[in] req: ioctl command from atapi_pt_cmd_t enum
++ * @param[inout] buf: pointer to in/out data
++ * Returns: 0 on success, non-zero on failure.
++ */
 +static int pt_v4v_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
-+    int ret = 0;
 +
 +    switch(req) {
 +        case ATAPI_PT_SET_GLOB_MEDIA_STATE:
-+            info->media_state = *(bool *)buf;
-+            if (xenstore_write_int(info->xenstore_glob_base, "media", info->media_state) != 0) {
-+                printf("failed to set media state\n");
++            DPRINTF("ATAPI_PT_SET_GLOB_MEDIA_STATE: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
 +            }
-+            if (info->media_state && info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+               pt_v4v_release_lock(pts);
-+               notify_xs_lock_state(info, 0);
-+            }
++            set_global_media_state(info, (*(uint32_t *)buf) ? true : false);
 +            break;
 +        case ATAPI_PT_GET_GLOB_MEDIA_STATE:
-+            if (buf) {
-+                *(bool *)buf = info->media_state ? true : false;
++            DPRINTF("ATAPI_PT_GET_GLOB_MEDIA_STATE: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
 +            }
++            *(uint32_t *)buf = info->media_state;
 +            break;
 +        case ATAPI_PT_GET_PHYS_LOCK:
-+            pt_v4v_get_lock(pts);
-+            notify_xs_lock_state(info, info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME);
 +            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
-+            break;
-+        case ATAPI_PT_GET_PHYS_LOCK_STATE:
++            if (!buf) {
++                return -ENOTSUP;
++            }
++            pt_v4v_acquire_global_lock(pts);
 +            *(uint32_t *)buf = info->lock_state;
-+            //DPRINTF("ATAPI_PT_GET_PHYS_LOCK_STATE=%d\n", info->lock_state);
 +            break;
 +        case ATAPI_PT_RELEASE_PHYS_LOCK:
-+            if (info->lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
-+                pt_v4v_release_lock(pts);
-+                notify_xs_lock_state(info, 0);
-+            }
 +            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++            pt_v4v_release_global_lock(pts);
 +            break;
 +        case ATAPI_PT_IOCTL_SG_IO:
-+            ret = pt_v4v_sg_ioctl(bs, SG_IO, buf);
-+            if (ret < 0) {
-+                DPRINTF("SG_IO ioctl() failed: %s\n", info->device_path);
++            DPRINTF("ATAPI_PT_IOCTL_SG_IO: %s\n", info->device_path);
++            if (pt_v4v_sg_ioctl(bs, SG_IO, buf) < 0) {
++                DPRINTF("SG_IO ioctl() failed (%s).\n", strerror(errno));
++                return -1;
 +            }
 +            break;
 +        case ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE:
-+            ret = pt_v4v_sg_ioctl(bs, SG_GET_RESERVED_SIZE, buf);
-+            if (ret < 0) {
-+                DPRINTF("SG_GET_RESERVED_SIZE ioctl() failed: %s\n", info->device_path);
++            DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
++            if (pt_v4v_sg_ioctl(bs, SG_GET_RESERVED_SIZE, buf) < 0) {
++                DPRINTF("SG_GET_RESERVED_SIZE ioctl() failed: %s\n", strerror(errno));
++                return -1;
 +            }
 +            break;
 +        default:
 +            return -ENOTSUP;
 +    }
 +
-+    return ret;
++    return 0;
 +}
-+
 +
 +static BlockDriver bdrv_host_pt_v4v = {
 +    .format_name = "atapi-pt",
@@ -1317,8 +1360,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-17 16:51:55.523289751 -0400
-@@ -0,0 +1,1675 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-18 16:06:37.672860766 -0400
+@@ -0,0 +1,1669 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1703,7 +1746,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    { 0x000000, 0x000000, "Unrecognised sense data"}
 +};
 +
-+static bool ptcmd_get_media_lock(BlockDriverState *bs)
++static bool ptcmd_get_global_media_lock(BlockDriverState *bs)
 +{
 +    uint32_t lock_state;
 +
@@ -1716,23 +1759,17 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    return false;
 +}
 +
-+static void ptcmd_set_media_state_absent(BlockDriverState *bs)
++static void ptcmd_set_global_media_state(BlockDriverState *bs, bool present)
 +{
-+    bool x = false;
-+    bdrv_ioctl(bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
++    uint32_t media_present = (uint32_t) present;
++    bdrv_ioctl(bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &media_present);
 +}
 +
-+static void ptcmd_set_media_state_present(BlockDriverState *bs)
++static bool ptcmd_get_global_media_state(BlockDriverState *bs)
 +{
-+    bool x = true;
-+    bdrv_ioctl(bs, ATAPI_PT_SET_GLOB_MEDIA_STATE, &x);
-+}
-+
-+static bool ptcmd_get_media_state_present(BlockDriverState *bs)
-+{
-+    bool x = true;
-+    bdrv_ioctl(bs, ATAPI_PT_GET_GLOB_MEDIA_STATE, &x);
-+    return x;
++    uint32_t media_present = true;
++    bdrv_ioctl(bs, ATAPI_PT_GET_GLOB_MEDIA_STATE, &media_present);
++    return media_present ? true : false;
 +}
 +
 +static bool ptcmd_do_sg_io(BlockDriverState *bs, void *buf)
@@ -2259,13 +2296,13 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    if (ev_class == 4 && ev_code == MEC_NEW_MEDIA) {
 +        /* This is a "new media" message coming from actual drive */
 +        ATAPI_DPRINTF("[ATAPI] new media detected\n");
-+        ptcmd_set_media_state_present(s->bs);
++        ptcmd_set_global_media_state(s->bs, true);
 +    }
 +
 +    if (ev_class == 4 && ev_code == MEC_MEDIA_REMOVAL) {
 +        /* This is a "media removed" message coming from actual drive */
 +        ATAPI_DPRINTF("[ATAPI] media removed\n");
-+        ptcmd_set_media_state_absent(s->bs);
++        ptcmd_set_global_media_state(s->bs, false);
 +    }
 +
 +    /* XXX: this ev_code check differs from orig q14 patch check for b[5]==2 */
@@ -2303,14 +2340,14 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +    event_notifier_test_and_clear(&as->e_ret);
 +
-+    glob_media_present = ptcmd_get_media_state_present(s->bs);
++    glob_media_present = ptcmd_get_global_media_state(s->bs);
 +
 +    if (as->result) {
 +        if ((as->sense.sense_key == SENSE_NOT_READY) &&
 +            (as->sense.asc == ASC_MEDIUM_NOT_PRESENT)) {
 +            if (glob_media_present) {
 +                ATAPI_DPRINTF("[ATAPI] sense no medium - media must be absent?\n");
-+                ptcmd_set_media_state_absent(s->bs);
++                ptcmd_set_global_media_state(s->bs, false);
 +            }
 +        }
 +        atapi_pt_error(s);
@@ -2325,7 +2362,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        (as->request[0] == GPCMD_READ_DISC_INFO)) {
 +        if (!glob_media_present) {
 +            ATAPI_DPRINTF("[ATAPI] read command detected - media must be present?\n");
-+            ptcmd_set_media_state_present(s->bs);
++            ptcmd_set_global_media_state(s->bs, true);
 +        }
 +    }
 +
@@ -2802,7 +2839,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        }
 +    }
 +
-+    if (!ptcmd_get_media_lock(s->bs)) {
++    if (!ptcmd_get_global_media_lock(s->bs)) {
 +        ATAPI_DPRINTF("refusing command: 0x%02x (\e[0;32m%s\e[m) dma=%d"
 +                          " timeout(%u)",
 +                          cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
