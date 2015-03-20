@@ -18,7 +18,6 @@ Signed-off-by: Chris Patterson <pattersonc@ainfosec.com>
  hw/ide/internal.h              |   18 +-
  hw/ide/pci.c                   |    4 +
  hw/ide/qdev.c                  |   42 +-
- include/block/atapi_pt_state.h |   37 +
  include/block/block_int.h      |    6 +
  include/qemu/event_notifier.h  |    5 +
  include/sysemu/blockdev.h      |    6 +
@@ -27,7 +26,6 @@ Signed-off-by: Chris Patterson <pattersonc@ainfosec.com>
  create mode 100644 block/atapi-pt-posix.c
  create mode 100644 hw/ide/atapi_pt.c
  create mode 100644 hw/ide/atapi_pt.h
- create mode 100644 include/block/atapi_pt_state.h
 
 Index: qemu-1.4.0/block/Makefile.objs
 ===================================================================
@@ -44,8 +42,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-18 18:25:29.333017181 -0400
-@@ -0,0 +1,1176 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-20 16:05:59.572104129 -0400
+@@ -0,0 +1,1276 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -90,7 +88,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +#include <libv4v.h>
 +#endif
 +
-+#include "block/atapi_pt_state.h"
++#include <block/atapi_pt_ioctl.h>
++#include <block/atapi_pt_v4v.h>
 +
 +typedef struct AtapiPtDeviceInfo {
 +    char device_path[256];
@@ -202,7 +201,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    /* release the lock if we are losing assignment */
 +    if (lock == -1) {
 +        info->assigned = 0;
-+        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
++        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +}
 +
@@ -256,7 +255,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    printf("eject_req_cb: eject detected %s = %d\n", info->device_path, eject);
 +
 +    if (eject) {
-+        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
++        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +#if 0
 +        /* queue media removed event */
 +        queue_media_event(s, false);
@@ -292,9 +291,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    info->assigned = assign;
 +
 +    if (assign) {
-+        bdrv_ioctl(info->bs, ATAPI_PT_GET_PHYS_LOCK, NULL);
++        bdrv_ioctl(info->bs, ATAPI_PT_ACQUIRE_LOCK, NULL);
 +    } else {
-+        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
++        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +
 +    /* ack receipt of request */
@@ -341,7 +340,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* release lock if media ejected */
 +    if (!media_present) {
-+       bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_PHYS_LOCK, NULL);
++       bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +}
 +
@@ -707,20 +706,20 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            }
 +            *(uint32_t *)buf = info->media_state ? true : false;
 +            break;
-+        case ATAPI_PT_GET_PHYS_LOCK:
-+            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
++        case ATAPI_PT_ACQUIRE_LOCK:
++            DPRINTF("ATAPI_PT_ACQUIRE_LOCK: %s\n", info->device_path);
 +            if (!buf) {
 +                return -ENOTSUP;
 +            }
 +            pt_local_acquire_global_lock(pts);
 +            *(uint32_t *)buf = info->lock_state;
 +            break;
-+        case ATAPI_PT_RELEASE_PHYS_LOCK:
-+            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++        case ATAPI_PT_RELEASE_LOCK:
++            DPRINTF("ATAPI_PT_RELEASE_LOCK: %s\n", info->device_path);
 +            pt_local_release_global_lock(pts);
 +            break;
-+        case ATAPI_PT_IOCTL_SG_IO:
-+            DPRINTF("ATAPI_PT_IOCTL_SG_IO: %s\n", info->device_path);
++        case ATAPI_PT_SG_IO:
++            DPRINTF("ATAPI_PT_SG_IO: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_IO, buf);
 +            if (ret < 0) {
 +                DPRINTF("SG_IO ioctl() failed (%s).\n", strerror(errno));
@@ -728,8 +727,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +                ret = 0;
 +            }
 +            break;
-+        case ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE:
-+            DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
++        case ATAPI_PT_SG_GET_RESERVED_SIZE:
++            DPRINTF("ATAPI_PT_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
 +            ret = ioctl(pts->fd, SG_GET_RESERVED_SIZE, buf);
 +            if (ret < 0) {
 +                DPRINTF("SG_GET_RESERVED_SIZE ioctl() failed: %s\n", strerror(errno));
@@ -755,6 +754,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +};
 +
 +#ifdef CONFIG_ATAPI_PT_V4V
++
 +#define V4V_TYPE 'W'
 +#define V4VIOCSETRINGSIZE       _IOW (V4V_TYPE,  1, uint32_t)
 +
@@ -766,16 +766,55 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +typedef struct BDRVStubdomPassThroughState {
 +    int v4v_fd;
-+
 +    v4v_addr_t remote_addr;
 +    v4v_addr_t local_addr;
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+    uint32_t max_xfer_len;
-+    int stubdom_id;
-+    uint8_t dev_id;
-+
++    uint8_t device_id;
 +    AtapiPtDeviceInfo dev_info;
 +} BDRVStubdomPassThroughState;
++
++/**
++ * Sends v4v message to atapi-pt-helper.
++ * @param[in] hs
++ * @param[in] buf: message to send
++ * @param[in] size: size of buf
++ * @returns true if message sent successfully, false otherwise.
++ */
++static bool pt_v4v_send_message(BDRVStubdomPassThroughState *pts, void *buf, size_t size)
++{
++    int ret;
++
++    ret = v4v_sendto(pts->v4v_fd, buf, size, 0, &pts->remote_addr);
++
++    if (ret != size) {
++        DPRINTF("v4v_sendto() failed (%s) - %d %d.\n",
++                strerror(errno), ret, (int)size);
++        return false;
++    }
++
++    return true;
++}
++
++/**
++ * Receive v4v message to atapi-pt-helper.
++ * @param[in] hs
++ * @param[out] buf: message to send
++ * @param[in] size: expected size of message
++ * @returns true if message received successfully, false otherwise.
++ */
++static bool pt_v4v_recv_message(BDRVStubdomPassThroughState *pts, void *buf, size_t size)
++{
++    int ret;
++
++    ret = v4v_recvfrom(pts->v4v_fd, buf, size, 0, &pts->remote_addr);
++
++    if (ret != size) {
++        DPRINTF("v4v_sendto() failed (%s) - %d %d.\n",
++                strerror(errno), ret, (int)size);
++        return false;
++    }
++
++    return true;
++}
 +
 +/**
 + * Close v4v device descriptor.
@@ -801,10 +840,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + */
 +static int pt_v4v_open_common(BDRVStubdomPassThroughState *pts, const char *filename)
 +{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
-+    int dev_name_len = strlen(filename);
++    pt_v4vcmd_open_request_t request;
++    pt_v4vcmd_open_response_t response;
 +    uint32_t v4v_ring_size = V4V_ATAPI_PT_RING_SIZE;
-+    int ret;
 +
 +    DPRINTF("%s: Open v4v socket.", __FUNCTION__);
 +    pts->v4v_fd = v4v_socket(SOCK_DGRAM);
@@ -830,37 +868,33 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return -1;
 +    }
 +
-+    io_buf[0] = ATAPI_PT_OPEN;
++    request.cmd = ATAPI_PTV4V_OPEN;
++    strncpy(&request.device_path[0], filename, sizeof(request.device_path));
 +
-+    memcpy(&io_buf[1], filename, dev_name_len);
-+    io_buf[dev_name_len + 1] = '\0';
++    DPRINTF("%s: send ATAPI_PTV4V_OPEN through v4v.", __FUNCTION__);
 +
-+    DPRINTF("%s: send ATAPI_PT_OPEN through v4v.", __FUNCTION__);
-+
-+    ret = v4v_sendto(pts->v4v_fd, io_buf, dev_name_len + 2, 0, &pts->remote_addr);
-+    if (ret != dev_name_len + 2) {
-+        DPRINTF("v4v_sendto() failed (%s).\n", strerror(errno));
++    if (!pt_v4v_send_message(pts, &request, sizeof(request))) {
++        DPRINTF("pt_v4v_send_message() failed\n");
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return -1;
 +    }
 +
-+    if (v4v_recvfrom(pts->v4v_fd, io_buf, 4, 0, &pts->remote_addr) != 4) {
-+        DPRINTF("v4v_recvfrom() failed (%s).\n", strerror(errno));
++    if (!pt_v4v_recv_message(pts, &response, sizeof(response))) {
++        DPRINTF("pt_v4v_recv_message failed\n");
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return -1;
 +    }
 +
-+    DPRINTF("recv %c%c.", io_buf[1], io_buf[2]);
-+    if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+        DPRINTF("v4v_recvfrom() failed (%s).\n", strerror(errno));
++    if (response.cmd != ATAPI_PTV4V_OPEN) {
++        DPRINTF("code mismatch - %d\n", response.cmd);
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return -1;
 +    }
 +
-+    pts->dev_id = io_buf[3];
++    pts->device_id = response.device_id;
 +    return 0;
 +}
 +
@@ -922,7 +956,6 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    return 100;
 +}
 +
-+
 +/**
 + * Grabs global exclusive lock.
 + * @param[in] pts
@@ -930,7 +963,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + */
 +static int pt_v4v_acquire_global_lock(BDRVStubdomPassThroughState *pts)
 +{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
++    pt_v4vcmd_acquire_lock_request_t request;
++    pt_v4vcmd_acquire_lock_response_t response;
 +
 +    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +        /* already have lock */
@@ -942,19 +976,32 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return 0;
 +    }
 +
-+    io_buf[0] = ATAPI_PT_GET_PHYS_LOCK;
-+    io_buf[1] = pts->dev_id;
++    request.cmd = ATAPI_PTV4V_ACQUIRE_LOCK;
++    request.device_id = pts->device_id;
 +
-+    if (v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr) != 2) {
-+        DPRINTF("v4v_sendto failed!\n");
++    if (!pt_v4v_send_message(pts, &request, sizeof(request))) {
++        DPRINTF("pt_v4v_send_message() failed\n");
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return 0;
 +    }
 +
-+    /* TODO: validate receive length */
-+    v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0, &pts->remote_addr);
-+    pts->dev_info.lock_state = io_buf[1];
++    if (!pt_v4v_recv_message(pts, &response, sizeof(response))) {
++        DPRINTF("pt_v4v_recv_message failed\n");
++        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
++        return 0;
++    }
++
++    /* validate received packet header */
++    if (response.cmd != ATAPI_PTV4V_ACQUIRE_LOCK) {
++        DPRINTF("ERROR: invalid packet data\n");
++        v4v_close(pts->v4v_fd);
++        pts->v4v_fd = -1;
++        return 0;
++    }
++
++    pts->dev_info.lock_state = response.lock_state;
 +
 +    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +        notify_xs_lock_state(&pts->dev_info, 1);
@@ -971,18 +1018,18 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + */
 +static void pt_v4v_release_global_lock(BDRVStubdomPassThroughState *pts)
 +{
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
++    pt_v4vcmd_release_lock_request_t request;
 +
 +    if (pts->dev_info.lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +        /* we don't have the lock, nothing to do */
 +        return;
 +    }
 +
-+    io_buf[0] = ATAPI_PT_RELEASE_PHYS_LOCK;
-+    io_buf[1] = pts->dev_id;
++    request.cmd = ATAPI_PTV4V_RELEASE_LOCK;
++    request.device_id = pts->device_id;
 +
-+    if (v4v_sendto(pts->v4v_fd, io_buf, 2, 0, &pts->remote_addr) != 2) {
-+        DPRINTF("v4v_sendto failed!\n");
++    if (!pt_v4v_send_message(pts, &request, sizeof(request))) {
++        DPRINTF("pt_v4v_send_message() failed\n");
 +        v4v_close(pts->v4v_fd);
 +        pts->v4v_fd = -1;
 +        return;
@@ -990,6 +1037,53 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
 +    notify_xs_lock_state(&pts->dev_info, 0);
++}
++
++
++
++/**
++ * Handles pass-through ioctls from atapi pt driver for atapi-pt-v4v devices
++ * @param[in] bs
++ * @param[out] size: reserved size response - must not be NULL.
++ * Returns: 0 on success, non-zero on failure.
++ */
++static int pt_v4v_sg_get_reserved_size(BlockDriverState *bs, uint32_t *size)
++{
++    BDRVStubdomPassThroughState *pts = bs->opaque;
++
++    pt_v4vcmd_sg_get_reserved_size_request_t request;
++    pt_v4vcmd_sg_get_reserved_size_response_t response;
++
++    DPRINTF("send SG_GET_RESERVED_SIZE through v4v\n");
++
++    assert(size != NULL);
++
++    *size = 0;
++
++    request.cmd = ATAPI_PTV4V_SG_GET_RESERVED_SIZE;
++    request.device_id = pts->device_id;
++
++    if (!pt_v4v_send_message(pts, &request, sizeof(request))) {
++        DPRINTF("pt_v4v_send_message() failed\n");
++        pt_v4v_close(bs);
++        return -1;
++    }
++
++    if (!pt_v4v_recv_message(pts, &response, sizeof(response))) {
++        DPRINTF("pt_v4v_recv_message failed\n");
++        pt_v4v_close(bs);
++        return -1;
++    }
++
++    /* validate received packet header */
++    if (response.cmd != ATAPI_PTV4V_SG_GET_RESERVED_SIZE) {
++        DPRINTF("ERROR: invalid packet data\n");
++        pt_v4v_close(bs);
++        return -1;
++    }
++
++    *size = response.size;
++    return 0;
 +}
 +
 +/**
@@ -1002,136 +1096,137 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +static int pt_v4v_sg_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
-+    uint8_t io_buf[MAX_V4V_MSG_SIZE];
++
++    struct sg_io_v4 *cmd = (struct sg_io_v4 *)buf;
++    struct request_sense *sense = (struct request_sense *)(uintptr_t) cmd->response;
++
++    /* sgio_v4 tracks pointers with u64 */
++    uint64_t req_xferp = 0;
++    uint64_t dout_xferp = 0;
++    uint64_t din_xferp = 0;
++    uint32_t din_xfer_len = 0;
++
++    uint8_t buf_out[sizeof(pt_v4vcmd_sg_io_request_t) + cmd->dout_xfer_len];
++    pt_v4vcmd_sg_io_request_t *request = (pt_v4vcmd_sg_io_request_t *)buf_out;
++
++    uint8_t buf_in[sizeof(pt_v4vcmd_sg_io_response_t) + cmd->din_xfer_len];
++    pt_v4vcmd_sg_io_response_t *response = (pt_v4vcmd_sg_io_response_t *)buf_in;
++
 +    int len;
 +
-+    struct sg_io_v4 *cmd;
-+    struct request_sense *sense;
-+    uint8_t *sg_buf;
-+    size_t current_transfer_len = 0;
-+    int is_dout = 0;
-+    uint8_t *copy_of_cmd_din_xferp = NULL;
++    if (sizeof(buf_out) > MAX_V4V_MSG_SIZE) {
++        DPRINTF("dout_data too large - cannot complete command\n");
++        return -1;
++    }
++    memset(buf_out, 0, sizeof(buf_out));
++
++    if (sizeof(buf_in) > MAX_V4V_MSG_SIZE) {
++        DPRINTF("din_data too large - cannot complete command\n");
++        return -1;
++    }
++    memset(buf_in, 0, sizeof(buf_in));
 +
 +    if (pts->v4v_fd == -1) {
 +        DPRINTF("v4v connection not initialized.");
 +        return -1;
 +    }
 +
-+    io_buf[0] = ATAPI_PT_IOCTL_SG_IO;
-+    io_buf[1] = pts->dev_id;
++    request->cmd = ATAPI_PTV4V_SG_IO;
++    request->device_id = pts->device_id;
 +
-+    io_buf[2] = ((req & 0xFF000000) >> 24) & 0x00FF;
-+    io_buf[3] = ((req & 0x00FF0000) >> 16) & 0x00FF;
-+    io_buf[4] = ((req & 0x0000FF00) >> 8) & 0x00FF;
-+    io_buf[5] = ((req & 0x000000FF) >> 0) & 0x00FF;
-+    len = 6;
++    DPRINTF("send SG_IO through v4v\n");
 +
-+    switch (req) {
-+    case SG_GET_RESERVED_SIZE:
-+        DPRINTF("send SG_GET_RESERVED_SIZE through v4v\n");
-+        if (v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
-+            DPRINTF("ERROR: v4v_sendto failed send!\n");
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
++    /* make sure dout_xfer_len will fit in request */
++    if (sizeof(buf_out) < sizeof(request) + cmd->dout_xfer_len) {
++        DPRINTF("error: bad dout_xfer_len %d", cmd->dout_xfer_len);
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        /* TODO: document me */
-+        len = 7;
++    /* make sure din_xfer_len will fit in response */
++    if (sizeof(buf_in) < sizeof(response) + cmd->din_xfer_len) {
++        DPRINTF("error: bad din_xfer_len %d", cmd->din_xfer_len);
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        if (v4v_recvfrom(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
-+            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
++    /* populate sgio */
++    memcpy(&request->sgio, cmd, sizeof(struct sg_io_v4));
 +
-+        DPRINTF("v4v recv %c%c\n", io_buf[1], io_buf[2]);
++    /* populate request data */
++    assert(cmd->request_len == sizeof(request->request_data));
 +
-+        if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
-+        memcpy(buf, &io_buf[3], sizeof(uint32_t));
-+        break;
-+    case SG_IO:
-+        DPRINTF("send SG_IO through v4v\n");
-+        sg_buf = &io_buf[len];
++    /* copy atapi packet request */
++    memcpy(&request->request_data[0], (void *)(uintptr_t)cmd->request, cmd->request_len);
 +
-+        cmd = (struct sg_io_v4 *)buf;
-+        sense = (struct request_sense *)(uintptr_t) cmd->response;
++    if (cmd->dout_xfer_len > 0) {
++        /* this is dout, update request with dout_xfer data */
++        memcpy(&request->dout_data[0], (void *)(uintptr_t)cmd->dout_xferp, cmd->dout_xfer_len);
++        request->dout_data_len = cmd->dout_xfer_len;
++    } else {
++        /* this is din, nothing else to do with request, just copy din state */
++        din_xfer_len = cmd->din_xfer_len;
++        din_xferp = cmd->din_xferp;
++    }
 +
-+        memcpy(sg_buf, cmd, sizeof(struct sg_io_v4));
-+        sg_buf += sizeof(struct sg_io_v4);
-+        len += sizeof(struct sg_io_v4);
++    /* save off dout pointer */
++    dout_xferp = cmd->dout_xferp;
++    req_xferp = cmd->request;
 +
-+        memcpy(sg_buf, (uint8_t *) (uintptr_t) cmd->request, cmd->request_len);
-+        sg_buf += cmd->request_len;
-+        len += cmd->request_len;
++    /* calculate packet len and fire away */
++    len = sizeof(*request) + request->dout_data_len;
++    if (!pt_v4v_send_message(pts, &request, len)) {
++        DPRINTF("pt_v4v_send_message() failed\n");
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        if (cmd->dout_xfer_len > 0) {
-+            is_dout = 1;
-+            current_transfer_len = cmd->dout_xfer_len;
-+            memcpy(sg_buf, (uint8_t *) (uintptr_t) cmd->dout_xferp,
-+                   cmd->dout_xfer_len);
-+            sg_buf += cmd->dout_xfer_len;
-+            len += cmd->dout_xfer_len;
-+        } else {
-+            current_transfer_len = cmd->din_xfer_len;
-+            copy_of_cmd_din_xferp = (uint8_t *) (uintptr_t) cmd->din_xferp;
-+        }
++    /* response coming back should be sizeof reply plus expected din data len */
++    len = sizeof(*response) + din_xfer_len;
++    if (!pt_v4v_recv_message(pts, response, len)) {
++        DPRINTF("pt_v4v_recv_message failed\n");
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        DPRINTF("v4v send cmd: 0x%#02x", *(uint8_t *) (uintptr_t) cmd->request);
++    /* validate correct command code */
++    if (response->cmd != ATAPI_PTV4V_SG_IO) {
++        DPRINTF("command response bad = %d\n", response->cmd);
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        if (v4v_sendto(pts->v4v_fd, io_buf, len, 0, &pts->remote_addr) != len) {
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
++    /* validate that din_xfer_data_len matches */
++    if (response->din_data_len != din_xfer_len) {
++        DPRINTF("ERROR: mismatch din_xfer_len! 0x%x 0%x\n",
++                response->din_data_len, din_xfer_len);
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        len = v4v_recvfrom(pts->v4v_fd, io_buf, MAX_V4V_MSG_SIZE, 0,
-+                           &pts->remote_addr);
++    /* copy sg_io_v4 struct back out as there are some output fields */
++    memcpy(cmd, &response->sgio, sizeof(struct sg_io_v4));
 +
-+        /* TODO: document packet structure */
-+        if (len < 6 + sizeof(struct sg_io_v4)) {
-+            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
++    /* restore sgio pointers */
++    cmd->dout_xferp = dout_xferp;
++    cmd->din_xferp = din_xferp;
++    cmd->response = (uint64_t)(uintptr_t)sense;
++    cmd->request = req_xferp;
 +
-+        DPRINTF("v4v recv %c%c.", io_buf[1], io_buf[2]);
-+        if (io_buf[1] != 'o' || io_buf[2] != 'k') {
-+            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
++    /* validate that din_xfer_data_len matches inside sgio packet */
++    if (cmd->din_xfer_len != din_xfer_len) {
++        DPRINTF("ERROR: mismatch cmd->din_xfer_len! 0x%x 0%x\n",
++                cmd->din_xfer_len, din_xfer_len);
++        pt_v4v_close(bs);
++        return -1;
++    }
 +
-+        sg_buf = &io_buf[6];
++    /* copy sense data back out */
++    memcpy(sense, &response->sense_data, sizeof(*sense));
 +
-+        /* copy sg_io_v4 struct back out */
-+        memcpy(cmd, sg_buf, sizeof(struct sg_io_v4));
-+        sg_buf += sizeof(struct sg_io_v4);
-+
-+        /* copy sense data back out after checking new expected minimum len */
-+        if (len < sizeof(struct sg_io_v4) + cmd->max_response_len) {
-+            DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
-+            pt_v4v_close(bs);
-+            return -1;
-+        }
-+        memcpy((uint8_t *) sense, sg_buf, cmd->max_response_len);
-+        sg_buf += cmd->max_response_len;
-+
-+        if (!is_dout) {
-+            /* copy din_xferp data back out after checking new minimum len */
-+            if (len < sizeof(struct sg_io_v4) + cmd->max_response_len + current_transfer_len) {
-+                DPRINTF("ERROR: v4v_recvfrom failed recv!\n");
-+                pt_v4v_close(bs);
-+                return -1;
-+            }
-+            memcpy(copy_of_cmd_din_xferp, sg_buf, current_transfer_len);
-+            sg_buf += current_transfer_len;
-+        }
-+        break;
-+    default:
-+        DPRINTF("ioctl (0x%#08lx) not handled for pass-through.", req);
-+        return -ENOTSUP;
++    if (din_xfer_len > 0) {
++        /* this is a din packet - copy din data back out */
++        memcpy((void *)(uintptr_t)din_xferp, &response->din_data[0], din_xfer_len);
 +    }
 +
 +    return 0;
@@ -1144,7 +1239,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @param[inout] buf: pointer to in/out data
 + * Returns: 0 on success, non-zero on failure.
 + */
-+static int pt_v4v_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
++static int pt_v4v_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
@@ -1164,28 +1259,31 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            }
 +            *(uint32_t *)buf = info->media_state;
 +            break;
-+        case ATAPI_PT_GET_PHYS_LOCK:
-+            DPRINTF("ATAPI_PT_GET_PHYS_LOCK: %s\n", info->device_path);
++        case ATAPI_PT_ACQUIRE_LOCK:
++            DPRINTF("ATAPI_PT_ACQUIRE_LOCK: %s\n", info->device_path);
 +            if (!buf) {
 +                return -ENOTSUP;
 +            }
 +            pt_v4v_acquire_global_lock(pts);
 +            *(uint32_t *)buf = info->lock_state;
 +            break;
-+        case ATAPI_PT_RELEASE_PHYS_LOCK:
-+            DPRINTF("ATAPI_PT_RELEASE_PHYS_LOCK: %s\n", info->device_path);
++        case ATAPI_PT_RELEASE_LOCK:
++            DPRINTF("ATAPI_PT_RELEASE_LOCK: %s\n", info->device_path);
 +            pt_v4v_release_global_lock(pts);
 +            break;
-+        case ATAPI_PT_IOCTL_SG_IO:
-+            DPRINTF("ATAPI_PT_IOCTL_SG_IO: %s\n", info->device_path);
++        case ATAPI_PT_SG_IO:
++            DPRINTF("ATAPI_PT_SG_IO: %s\n", info->device_path);
 +            if (pt_v4v_sg_ioctl(bs, SG_IO, buf) < 0) {
 +                DPRINTF("SG_IO ioctl() failed (%s).\n", strerror(errno));
 +                return -1;
 +            }
 +            break;
-+        case ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE:
-+            DPRINTF("ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
-+            if (pt_v4v_sg_ioctl(bs, SG_GET_RESERVED_SIZE, buf) < 0) {
++        case ATAPI_PT_SG_GET_RESERVED_SIZE:
++            DPRINTF("ATAPI_PT_SG_GET_RESERVED_SIZE: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
++            }
++            if (pt_v4v_sg_get_reserved_size(bs, buf) != 0) {
 +                DPRINTF("SG_GET_RESERVED_SIZE ioctl() failed: %s\n", strerror(errno));
 +                return -1;
 +            }
@@ -1360,8 +1458,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-18 16:06:37.672860766 -0400
-@@ -0,0 +1,1669 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-20 14:32:51.475999220 -0400
+@@ -0,0 +1,1670 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1391,7 +1489,8 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +#include "atapi_pt.h"
 +#include "block/block.h"
 +#include "block/block_int.h"
-+#include "block/atapi_pt_state.h"
++#include <block/atapi_pt_ioctl.h>
++#include <block/atapi_pt_v4v.h>
 +
 +#define ATAPI_PT_DEBUG
 +
@@ -1750,7 +1849,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +{
 +    uint32_t lock_state;
 +
-+    bdrv_ioctl(bs, ATAPI_PT_GET_PHYS_LOCK, &lock_state);
++    bdrv_ioctl(bs, ATAPI_PT_ACQUIRE_LOCK, &lock_state);
 +
 +    if (lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +        return true;
@@ -1774,12 +1873,12 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +static bool ptcmd_do_sg_io(BlockDriverState *bs, void *buf)
 +{
-+    return bdrv_ioctl(bs, ATAPI_PT_IOCTL_SG_IO, buf);
++    return bdrv_ioctl(bs, ATAPI_PT_SG_IO, buf);
 +}
 +
 +static bool ptcmd_do_sg_get_reserved_size(BlockDriverState *bs, void *buf)
 +{
-+    return bdrv_ioctl(bs, ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE, buf);
++    return bdrv_ioctl(bs, ATAPI_PT_SG_GET_RESERVED_SIZE, buf);
 +}
 +
 +static char const *atapi_sense_to_str(uint8_t const key,
@@ -3408,65 +3507,6 @@ Index: qemu-1.4.0/hw/ide/qdev.c
  }
  
  type_init(ide_register_types)
-Index: qemu-1.4.0/include/block/atapi_pt_state.h
-===================================================================
---- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/include/block/atapi_pt_state.h	2015-03-18 10:29:19.948480831 -0400
-@@ -0,0 +1,54 @@
-+/*
-+ * Copyright (C) 2014 Citrix Systems Ltd
-+ *
-+ * This program is free software; you can redistribute it and/or
-+ * modify it under the terms of the GNU General Public License
-+ * as published by the Free Software Foundation; either version 2
-+ * of the License, or (at your option) any later version.
-+ *
-+ * This program is distributed in the hope that it will be useful,
-+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
-+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-+ * GNU General Public License for more details.
-+ *
-+ * You should have received a copy of the GNU General Public License
-+ * along with this program; if not, write to the Free Software
-+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-+ */
-+
-+#ifndef _ATAPI_PT_H_
-+#define _ATAPI_PT_H_
-+
-+typedef enum {
-+    MEDIA_ABSENT        = 0x00,
-+    MEDIA_PRESENT       = 0x01,
-+} atapi_pt_media_state_t;
-+
-+typedef enum {
-+    ATAPI_PT_OPEN                        = 0x00,
-+    ATAPI_PT_CLOSE                       = 0x01,
-+    ATAPI_PT_IOCTL_SG_IO                 = 0x03,
-+    ATAPI_PT_IOCTL_SG_GET_RESERVED_SIZE  = 0x04,
-+    ATAPI_PT_GET_PHYS_LOCK               = 0x05,
-+    ATAPI_PT_GET_PHYS_LOCK_STATE         = 0x06,
-+    ATAPI_PT_RELEASE_PHYS_LOCK           = 0x07,
-+    ATAPI_PT_SET_GLOB_MEDIA_STATE        = 0x08,
-+    ATAPI_PT_GET_GLOB_MEDIA_STATE        = 0x09,
-+    ATAPI_PT_NOTIFY_ASSIGNED_LOCK        = 0x0A,
-+} atapi_pt_cmd_t;
-+
-+typedef enum {
-+    ATAPI_PT_LOCK_STATE_UNLOCKED         = 0x00,
-+    ATAPI_PT_LOCK_STATE_LOCKED_BY_ME     = 0x01,
-+    ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER  = 0x02,
-+} atapi_pt_lock_state_t;
-+
-+/*
-+typedef struct {
-+    uint32_t notify_eject_request:1;
-+    uint32_t notify_media_removed:1;
-+    uint32_t notify_new_media:1;
-+    uint32_t reserved:29;
-+} atapi_pt_notify_state_t;
-+*/
-+#endif /* !_ATAPI_PT_H_ */
 Index: qemu-1.4.0/include/qemu/event_notifier.h
 ===================================================================
 --- qemu-1.4.0.orig/include/qemu/event_notifier.h	2013-02-15 18:05:35.000000000 -0500
@@ -3560,3 +3600,137 @@ Index: qemu-1.4.0/util/event_notifier-posix.c
 +    return value;
 +}
 +#endif
+Index: qemu-1.4.0/include/block/atapi_pt_ioctl.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ qemu-1.4.0/include/block/atapi_pt_ioctl.h	2015-03-20 14:31:39.975997877 -0400
+@@ -0,0 +1,34 @@
++/*
++ *
++ * Copyright (C) 2015 Assured Information Security, Chris Patterson <pattersonc@ainfosec.com>
++ * Copyright (C) 2014 Citrix Systems Ltd
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
++ */
++
++#ifndef _ATAPI_PT_IOCTL_H_
++#define _ATAPI_PT_IOCTL_H_
++
++typedef enum {
++    ATAPI_PT_OPEN                        = 0x00,
++    ATAPI_PT_SG_IO                       = 0x01,
++    ATAPI_PT_SG_GET_RESERVED_SIZE        = 0x02,
++    ATAPI_PT_ACQUIRE_LOCK                = 0x03,
++    ATAPI_PT_RELEASE_LOCK                = 0x04,
++    ATAPI_PT_GET_GLOB_MEDIA_STATE        = 0x05,
++    ATAPI_PT_SET_GLOB_MEDIA_STATE        = 0x06,
++} atapi_pt_ioctl_cmd_t;
++
++#endif /* !_ATAPI_PT_IOCTL_H_ */
+Index: qemu-1.4.0/include/block/atapi_pt_v4v.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ qemu-1.4.0/include/block/atapi_pt_v4v.h	2015-03-20 16:05:07.152103145 -0400
+@@ -0,0 +1,90 @@
++/*
++ *
++ * Copyright (C) 2015 Assured Information Security, Chris Patterson <pattersonc@ainfosec.com>
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
++ */
++
++#ifndef _ATAPI_PT_V4V_H_
++#define _ATAPI_PT_V4V_H_
++
++typedef enum {
++    ATAPI_PT_LOCK_STATE_UNLOCKED         = 0x00,
++    ATAPI_PT_LOCK_STATE_LOCKED_BY_ME     = 0x01,
++    ATAPI_PT_LOCK_STATE_LOCKED_BY_OTHER  = 0x02,
++} atapi_pt_lock_state_t;
++
++typedef enum {
++    ATAPI_PTV4V_OPEN                     = 0x00,
++    ATAPI_PTV4V_SG_IO                    = 0x01,
++    ATAPI_PTV4V_SG_GET_RESERVED_SIZE     = 0x02,
++    ATAPI_PTV4V_ACQUIRE_LOCK             = 0x03,
++    ATAPI_PTV4V_RELEASE_LOCK             = 0x04,
++} atapi_ptv4v_cmd_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_OPEN */
++    char device_path[256];
++} __attribute__((packed)) pt_v4vcmd_open_request_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_OPEN */
++    uint8_t device_id;
++} __attribute__((packed)) pt_v4vcmd_open_response_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_ACQUIRE_LOCK */
++    uint8_t device_id;
++} __attribute__((packed)) pt_v4vcmd_acquire_lock_request_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_ACQUIRE_LOCK */
++    uint8_t lock_state; /* atapi_pt_lock_state_t */
++} __attribute__((packed)) pt_v4vcmd_acquire_lock_response_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_RELEASE_LOCK */
++    uint8_t device_id;
++} __attribute__((packed)) pt_v4vcmd_release_lock_request_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_SG_GET_RESERVED_SIZE */
++    uint8_t device_id;
++} __attribute__((packed)) pt_v4vcmd_sg_get_reserved_size_request_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_SG_GET_RESERVED_SIZE */
++    uint32_t size;
++} __attribute__((packed)) pt_v4vcmd_sg_get_reserved_size_response_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_SG_IO */
++    uint8_t device_id;
++    struct sg_io_v4 sgio;
++    uint8_t request_data[12]; /* ATAPI_PACKET_SIZE */
++    uint32_t dout_data_len;
++    uint8_t dout_data[];
++} __attribute__((packed)) pt_v4vcmd_sg_io_request_t;
++
++typedef struct {
++    uint8_t cmd; /* ATAPI_PTV4V_SG_IO */
++    uint8_t device_id;    
++    struct sg_io_v4 sgio;
++    struct request_sense sense_data;
++    uint32_t din_data_len;
++    uint8_t din_data[];
++} __attribute__((packed)) pt_v4vcmd_sg_io_response_t;
++
++#endif /* !_ATAPI_PT_V4V_H_ */
