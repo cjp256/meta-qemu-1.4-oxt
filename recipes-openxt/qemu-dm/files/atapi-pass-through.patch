@@ -21,7 +21,7 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-24 17:48:03.618707255 -0400
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-24 17:48:05.742707295 -0400
 @@ -0,0 +1,1319 @@
 +/*
 + * ATAPI guest commands translation.
@@ -1480,7 +1480,7 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-24 17:40:38.190698893 -0400
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-24 17:54:30.478714518 -0400
 @@ -0,0 +1,1864 @@
 +/*
 + * ATAPI guest commands translation.
@@ -2525,13 +2525,13 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    } while ((!as->result) && (*req_len_p > seg_offset));
 +
 +    if (as->result) {
++        char *p = (char *)&as->sense;
 +        switch (as->sense.error_code) {
 +        case 0x70 ... 0x71:
 +            PT_DEBUG("command error:\n");
 +            PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
 +            break;
 +        case 0x72 ... 0x73:
-+            char *p = (char *)&as->sense;
 +            PT_DEBUG("command spc-3 error:\n");
 +            PT_DEBUG_SENSE(p[1] & 0xF, p[2], p[3]);
 +            PT_LOG("suppressing error\n");
