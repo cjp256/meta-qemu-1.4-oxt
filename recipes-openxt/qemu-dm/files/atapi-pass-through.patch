@@ -21,8 +21,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-23 18:20:12.961121437 -0400
-@@ -0,0 +1,1311 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-24 17:48:03.618707255 -0400
+@@ -0,0 +1,1319 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -99,7 +99,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    BlockDriverState *bs;
 +} AtapiPtDeviceInfo;
 +
-+#define DEBUG_PTPOSIX 1
++#define DEBUG_PTPOSIX 0
 +
 +/**
 + * PT_LOG: information to always log (errors & important low-volume events)
@@ -168,7 +168,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +
-+    if (xenstore_read_int(info->xenstore_global_base, "media", &info->media_state) != 0) {
++    if (xenstore_read_int(info->xenstore_global_base, "media",
++                          &info->media_state) != 0) {
 +        info->media_state = 0;
 +    }
 +
@@ -194,6 +195,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* release the lock if we are losing assignment */
 +    if (lock == -1) {
++        info->assigned = 0;
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +}
@@ -222,7 +224,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +
-+    if (xenstore_read_int(info->xenstore_domain_base, "switcher/have_focus", &info->have_focus) != 0) {
++    if (xenstore_read_int(info->xenstore_domain_base, "switcher/have_focus",
++                          &info->have_focus) != 0) {
 +        /* if have_focus key does not exist - we don't have focus */
 +        info->have_focus = 0;
 +    }
@@ -240,7 +243,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +    int eject = 0;
 +
-+    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "req-eject", &eject) != 0) {
++    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "req-eject",
++                          &eject) != 0) {
 +        /* probably just catching the rm */
 +        return;
 +    }
@@ -249,10 +253,6 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    if (eject) {
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
-+#if 0
-+        /* queue media removed event */
-+        queue_media_event(s, false);
-+#endif
 +    }
 +
 +    /* ack receipt of request */
@@ -268,7 +268,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
 +    int assign = 0;
 +
-+    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "req-assign", &assign) != 0) {
++    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "req-assign",
++                          &assign) != 0) {
 +        /* probably just catching the rm */
 +        return;
 +    }
@@ -324,7 +325,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    PT_LOG("set_global_media_state: %d\n", info->media_state);
 +
-+    if (xenstore_write_int(info->xenstore_global_base, "media", info->media_state) != 0) {
++    if (xenstore_write_int(info->xenstore_global_base, "media",
++                           info->media_state) != 0) {
 +        PT_LOG("failed to set media state\n");
 +    }
 +
@@ -342,7 +344,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @returns true if init OK, otherwise false.
 + */
 +static bool atapi_pt_device_info_init(AtapiPtDeviceInfo *info,
-+                                      const char *filename, BlockDriverState *bs)
++                                      const char *filename,
++                                      BlockDriverState *bs)
 +{
 +    char path[256];
 +
@@ -370,7 +373,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +             info->device_addr_c,
 +             info->device_addr_d);
 +
-+    snprintf(info->xenstore_bsgdevreq_base, sizeof(info->xenstore_bsgdevreq_base),
++    snprintf(info->xenstore_bsgdevreq_base,
++             sizeof(info->xenstore_bsgdevreq_base),
 +             "/local/domain/%d/bsgdev-req/%d_%d_%d_%d",
 +             xen_domid,
 +             info->device_addr_a,
@@ -396,7 +400,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "autolock", autolock_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "autolock",
++                            autolock_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
@@ -406,30 +411,35 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_bsgdev_base, "lock", lock_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_bsgdev_base, "lock",
++                            lock_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_domain_base, "switcher/have_focus", have_focus_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_domain_base, "switcher/have_focus",
++                            have_focus_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
 +
-+    /* XXX: xenstore_add_watch() will open xenstore handle so xenstore_read should be safe */
-+    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "autolock", &info->autolock) != 0) {
++    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "autolock",
++                          &info->autolock) != 0) {
 +        info->autolock = 0;
 +    }
 +
-+    if (xenstore_read_int(info->xenstore_global_base, "media", &info->media_state) != 0) {
++    if (xenstore_read_int(info->xenstore_global_base, "media",
++                          &info->media_state) != 0) {
 +        info->media_state = 0;
 +    }
 +
-+    if (xenstore_read_int(info->xenstore_domain_base, "switcher/have_focus", &info->have_focus) != 0) {
++    if (xenstore_read_int(info->xenstore_domain_base,
++                          "switcher/have_focus", &info->have_focus) != 0) {
 +        info->have_focus = 0;
 +    }
 +
-+    if (xenstore_read_int(info->xenstore_bsgdev_base, "lock", &info->lock_state) != 0) {
++    if (xenstore_read_int(info->xenstore_bsgdev_base,
++                          "lock", &info->lock_state) != 0) {
 +        info->lock_state = 0;
 +    }
 +
@@ -526,7 +536,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-local:", strlen("atapi-pt-local:")) != 0) {
 +        PT_DEBUG("pt_local_probe_device: not a pt local %s\n", filename);
-+        return 0;
++        return -1;
 +    }
 +
 +    /* skip past protocol */
@@ -538,29 +548,21 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    if (fd < 0) {
 +        PT_LOG("failed to open %s\n", filename);
-+        return 0;
++        return -1;
 +    }
 +
 +    if (fstat(fd, &st) < 0) {
-+        PT_LOG("failed to validate blockdev %s - fstat failed\n", filename);
++        PT_LOG("failed to validate %s - fstat failed\n", filename);
 +        qemu_close(fd);
-+        return 0;
++        return -1;
 +    }
 +
 +    if (S_ISBLK(st.st_mode)) {
-+        PT_LOG("failed to validate blockdev %s - not block device?\n", filename);
++        PT_LOG("failed to validate %s - not a block device\n", filename);
 +        qemu_close(fd);
-+        return 0;
++        return -1;
 +    }
 +
-+    /* Attempt to detect via a CDROM specific ioctl */
-+    if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) < 0) {
-+        PT_LOG("CDROM_DRIVE_STATUS failed path = %s\n", filename);
-+        qemu_close(fd);
-+        return 0;
-+    }
-+
-+    PT_LOG("CDROM_DRIVE_STATUS ok %s\n", filename);
 +    qemu_close(fd);
 +    return 100;
 +}
@@ -675,7 +677,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @param[inout] buf: pointer to in/out data
 + * Returns: 0 on success, non-zero on failure.
 + */
-+static int pt_local_ioctl(BlockDriverState * bs, unsigned long int req, void *buf)
++static int pt_local_ioctl(BlockDriverState * bs, unsigned long int req,
++                          void *buf)
 +{
 +    BDRVPosixPassThroughState *pts = bs->opaque;
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
@@ -769,7 +772,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @param[in] size: size of buf
 + * @returns true if message sent successfully, false otherwise.
 + */
-+static bool pt_v4v_send_message(BDRVStubdomPassThroughState *pts, void *buf, size_t size)
++static bool pt_v4v_send_message(BDRVStubdomPassThroughState *pts, void *buf,
++                                size_t size)
 +{
 +    int ret;
 +
@@ -793,7 +797,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @param[in] size: expected size of message
 + * @returns true if message received successfully, false otherwise.
 + */
-+static bool pt_v4v_recv_message(BDRVStubdomPassThroughState *pts, void *buf, size_t size)
++static bool pt_v4v_recv_message(BDRVStubdomPassThroughState *pts, void *buf,
++                                size_t size)
 +{
 +    int ret;
 +
@@ -932,8 +937,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-v4v:", strlen("atapi-pt-v4v:")) != 0) {
-+        PT_DEBUG("pt_v4v_probe_device: not a pt local %s\n", filename);
-+        return 0;
++        PT_DEBUG("not a pt local %s\n", filename);
++        return -1;
 +    }
 +
 +    /* skip past protocol */
@@ -942,7 +947,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    /* try to open v4v device given filename */
 +    if (pt_v4v_open_common(&pts, filename) == -1) {
 +        PT_DEBUG("cannot open %s\n", filename);
-+        return 0;
++        return -1;
 +    }
 +
 +    v4v_close(pts.v4v_fd);
@@ -1091,12 +1096,13 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 + * @param[inout] buf: pointer to in/out data
 + * Returns: 0 on success, non-zero on failure.
 + */
-+static int pt_v4v_sg_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
++static int pt_v4v_sg_ioctl(BlockDriverState *bs, unsigned long int req,
++                           void *buf)
 +{
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
 +
 +    struct sg_io_v4 *cmd = (struct sg_io_v4 *)buf;
-+    struct request_sense *sense = (struct request_sense *)(uintptr_t) cmd->response;
++    struct request_sense *sense;
 +
 +    /* sgio_v4 tracks pointers with u64 */
 +    uint64_t req_xferp = 0;
@@ -1177,9 +1183,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        din_xferp = cmd->din_xferp;
 +    }
 +
-+    /* save off dout pointer */
++    /* save off pointers */
 +    dout_xferp = cmd->dout_xferp;
 +    req_xferp = cmd->request;
++    sense = (struct request_sense *)(uintptr_t) cmd->response;
 +
 +    /* calculate packet len and fire away */
 +    len = sizeof(*request) + request->dout_data_len;
@@ -1240,7 +1247,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    if (din_xfer_len > 0) {
 +        /* this is a din packet - copy din data back out */
-+        memcpy((void *)(uintptr_t)din_xferp, &response->din_data[0], din_xfer_len);
++        memcpy((void *)(uintptr_t)din_xferp, &response->din_data[0],
++               din_xfer_len);
 +    }
 +
 +    return 0;
@@ -1472,8 +1480,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-23 18:17:32.145118418 -0400
-@@ -0,0 +1,1670 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-24 17:40:38.190698893 -0400
+@@ -0,0 +1,1864 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1506,9 +1514,41 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +#include <block/atapi_pt_ioctl.h>
 +#include <block/atapi_pt_v4v.h>
 +
-+//#define ATAPI_PT_DEBUG
++#define DEBUG_ATAPI_PT 1
 +
-+#if defined(ATAPI_PT_DEBUG)
++/**
++ * PT_LOG: information to always log (errors & important low-volume events)
++ * @param fmt,... printf style arguments
++ */
++#define PT_LOG(fmt, ...)                                           \
++    do {                                                           \
++            fprintf(stdout, "[%s:%s:%d] " fmt,                     \
++                    __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);      \
++    } while (0)
++
++/**
++ * PT_DEBUG: debug level bits
++ * @param fmt,... printf style arguments
++ */
++#define PT_DEBUG(fmt, ...)                                         \
++    do {                                                           \
++        if (DEBUG_ATAPI_PT)                                         \
++            fprintf(stdout, "[%s:%s:%d] " fmt,                     \
++                    __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);      \
++    } while (0)
++
++/**
++ * PT_DEBUG_SENSE: debug sense data
++ * @param key
++ * @param asc
++ * @param ascq
++ */
++#define PT_DEBUG_SENSE(key, asc, ascq) \
++    do {\
++        PT_DEBUG("sense key=0x%02x asc=0x%02x ascq=0x%02x str=%s\n", \
++                      key, asc, ascq, atapi_sense_to_str(key, asc, ascq)); \
++    } while (0)
++
 +/* From Table 459 of the SFF8090 Ver. 4 (Mt. Fuji) draft standard.
 + * Code is (key << 16) | (asc << 8) | ascq
 + * Mask is a bit mask, since some codes span ranges of values. */
@@ -1867,51 +1907,75 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +    code = ((key & 0xFF) << 16) | ((asc & 0xFF) << 8) | (ascq & 0xFF);
 +
-+    for (i = 0; 1; ++i)
-+        if ((code & sense_data_texts[i].mask) ==
-+            sense_data_texts[i].code)
++    for (i = 0; 1; ++i) {
++        if ((code & sense_data_texts[i].mask) == sense_data_texts[i].code) {
 +            break;
++        }
++    }
 +
 +    return sense_data_texts[i].text;
 +}
 +
 +static void atapi_pt_dump_hexa(void *message, unsigned int len)
 +{
-+    char buf[128];
-+    char *p;
++    char *p = (char *)message;
 +    int i;
 +
-+    if (NULL != message) {
-+        p = message;
-+        memset(buf, 0, sizeof(buf));
++    if (!p) {
++        return;
++    }
 +
-+        fprintf(stderr, "dump: [");
-+        for (i = 0; i < len; i++) {
-+            fprintf(stderr, "%02x ", p[i]);
++    PT_LOG("dumping %u bytes [", len);
++    for (i = 0; i < len;) {
++        /* print up to 8 at a time to reduce syslog line spamming */
++        int rem = len - i;
++        switch (rem)
++        {
++            case 1:
++                PT_LOG("pos=%d: 0x%02x ]\n", i, p[i]);
++                i += 1;
++                break;
++            case 2:
++                PT_LOG("pos=%d: 0x%02x 0x%02x ]\n",
++                       i, p[i], p[i+1]);
++                i += 2;
++                break;
++            case 3:
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x ]\n",
++                       i, p[i], p[i+1], p[i+2]);
++                i += 3;
++                break;
++            case 4:
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x 0x%02x ]\n",
++                       i, p[i], p[i+1], p[i+2], p[i+3]);
++                i += 4;
++                break;
++            case 5:
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x ]\n",
++                       i, p[i], p[i+1], p[i+2], p[i+3], p[i+4]);
++                i += 5;
++                break;
++            case 6:
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x ]\n",
++                       i, p[i], p[i+1], p[i+2], p[i+3], p[i+4], p[i+5]);
++                i += 6;
++                break;
++            case 7:
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x "
++                       "0x%02x ]\n", i, p[i], p[i+1], p[i+2], p[i+3], p[i+4],
++                       p[i+5], p[i+6]);
++                i += 7;
++                break;
++            default:
++                /* >= 8 */
++                PT_LOG("pos=%d: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x "
++                       "0x%02x 0x%02x ]\n", i, p[i], p[i+1], p[i+2], p[i+3],
++                       p[i+4], p[i+5], p[i+6], p[i+7]);
++                i += 8;
++                break;
 +        }
-+
-+        fprintf(stderr, "]\n");
 +    }
 +}
-+
-+#define ATAPI_DPRINTF(fmt, args...) \
-+    do { \
-+        fprintf(stderr, "[%s][%s(%d)]: " fmt "\n", \
-+                __FILE__, __func__, __LINE__, ## args); \
-+    } while (0)
-+
-+#define ATAPI_DUMP_SENSE(key, asc, ascq) \
-+    do {\
-+        ATAPI_DPRINTF("sense 0x%02x.%02x.%02x (\e[0;31m%s\e[m)", \
-+                      key, asc, ascq, atapi_sense_to_str(key, asc, ascq)); \
-+    } while (0)
-+
-+#else                /* !ATAPI_PT_DEBUG */
-+#define ATAPI_DPRINTF(fmt, args...) \
-+    do { } while (0)
-+#define ATAPI_DUMP_SENSE(key, asc, ascq) \
-+    do { } while (0)
-+#endif
 +
 +/* For each SCSI command we need to know up to 3 data sizes. These are:
 + * 1. The amount of data to send to the LU.
@@ -1969,60 +2033,222 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    struct atapi_pt_size_recipes din_recipe;
 +    char const *name;
 +} atapi_cmd_table[0x100] = {
-+    /*                  CMD Number                    |     OUT       |   BUFFER      |     IN     */
-+    SET_ATAPI_CMD(GPCMD_TEST_UNIT_READY,                0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_REQUEST_SENSE,                  0, 0, 0, 0,     0, 4, 1, 1,     8, 7, 1, 1),
-+    SET_ATAPI_CMD(GPCMD_FORMAT_UNIT,                   12, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_INQUIRY,                        0, 0, 0, 0,     0, 4, 1, 1,     5, 4, 1, 1),
-+    SET_ATAPI_CMD(GPCMD_START_STOP_UNIT,                0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL,   0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_FORMAT_CAPACITIES,         0, 0, 0, 0,     0, 7, 2, 1,     4, 3, 1, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_CDVD_CAPACITY,             0, 0, 0, 0,     8, 0, 0, 0,     8, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_10,                        0, 0, 0, 0,     0, 7, 2, CDFSZ, -1,0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_WRITE_10,                       0, 7, 2, CDFSZ, 0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SEEK,                           0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_WRITE_AND_VERIFY_10,            0, 7, 2, CDFSZ, 0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_VERIFY_10,                      0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_FLUSH_CACHE,                    0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_WRITE_BUFFER,                   0, 6, 3, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_BUFFER,                    0, 0, 0, 0,     0, 6, 3, 1,     4, 1, 3, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_SUBCHANNEL,                0, 0, 0, 0,     0, 7, 2, 1,     4, 2, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_TOC_PMA_ATIP,              0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_HEADER,                    0, 0, 0, 0,     0, 7, 2, 1,     8, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_PLAY_AUDIO_10,                  0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_GET_CONFIGURATION,              0, 0, 0, 0,     0, 7, 2, 1,     4, 0, 4, 1),
-+    SET_ATAPI_CMD(GPCMD_PLAY_AUDIO_MSF,                 0, 0, 0, 0,     -1,0, 0, 0,     -1,0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_GET_EVENT_STATUS_NOTIFICATION,  0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_PAUSE_RESUME,                   0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_STOP_PLAY_SCAN,                 0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_DISC_INFO,                 0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_TRACK_RZONE_INFO,          0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_RESERVE_RZONE_TRACK,            0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SEND_OPC,                       0, 7, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_MODE_SELECT_10,                 0, 7, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_REPAIR_RZONE_TRACK,             0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_MODE_SENSE_10,                  0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_CLOSE_TRACK,                    0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_BUFFER_CAPACITY,           0, 0, 0, 0,     0, 7, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_SEND_CUE_SHEET,                 0, 6, 3, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_BLANK,                          0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SEND_EVENT,                     0, 8, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SEND_KEY,                       0, 8, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_REPORT_KEY,                     0, 0, 0, 0,     0, 8, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_LOAD_UNLOAD,                    0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SET_READ_AHEAD,                 0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_12,                        0, 0, 0, 0,     0, 6, 4, CDFSZ, -1,0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_WRITE_12,                       0, 6, 4, CDFSZ, 0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_GET_PERFORMANCE,                0, 0, 0, 0,     0, 8, 2, 1,     4, 0, 4, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_DVD_STRUCTURE,             0, 0, 0, 0,     0, 8, 2, 1,     2, 0, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_SET_STREAMING,                  0, 9, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_READ_CD_MSF,                    0, 0, 0, 0,     -1,0, 0, 0,     -1,0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SCAN,                           0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SET_SPEED,                      0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_PLAY_CD,                        0, 0, 0, 0,     0, 0, 0, 0,     0, 0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_MECHANISM_STATUS,               0, 0, 0, 0,     0, 8, 2, 1,     8, 6, 2, 1),
-+    SET_ATAPI_CMD(GPCMD_READ_CD,                        0, 0, 0, 0,     0, 6, 3, 1,     -1,0, 0, 0),
-+    SET_ATAPI_CMD(GPCMD_SEND_DVD_STRUCTURE,             0, 8, 2, 1,     0, 0, 0, 0,     0, 0, 0, 0),
++    /* SET_ATAPI_CMD(CMD,
++                     OUT[4],
++                     BUFFER[4],
++                     IN[4]) */
++    SET_ATAPI_CMD(GPCMD_TEST_UNIT_READY,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_REQUEST_SENSE,
++                  0, 0, 0, 0,
++                  0, 4, 1, 1,
++                  8, 7, 1, 1),
++    SET_ATAPI_CMD(GPCMD_FORMAT_UNIT,
++                  12, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_INQUIRY,
++                  0, 0, 0, 0,
++                  0, 4, 1, 1,
++                  5, 4, 1, 1),
++    SET_ATAPI_CMD(GPCMD_START_STOP_UNIT,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_FORMAT_CAPACITIES,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  4, 3, 1, 1),
++    SET_ATAPI_CMD(GPCMD_READ_CDVD_CAPACITY,
++                  0, 0, 0, 0,
++                  8, 0, 0, 0,
++                  8, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_10,
++                  0, 0, 0, 0,
++                  0, 7, 2, CDFSZ,
++                  -1,0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_WRITE_10,
++                  0, 7, 2, CDFSZ,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SEEK,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_WRITE_AND_VERIFY_10,
++                  0, 7, 2, CDFSZ,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_VERIFY_10,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_FLUSH_CACHE,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_WRITE_BUFFER,
++                  0, 6, 3, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_BUFFER,
++                  0, 0, 0, 0,
++                  0, 6, 3, 1,
++                  4, 1, 3, 1),
++    SET_ATAPI_CMD(GPCMD_READ_SUBCHANNEL,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  4, 2, 2, 1),
++    SET_ATAPI_CMD(GPCMD_READ_TOC_PMA_ATIP,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_READ_HEADER,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  8, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_PLAY_AUDIO_10,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_GET_CONFIGURATION,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  4, 0, 4, 1),
++    SET_ATAPI_CMD(GPCMD_PLAY_AUDIO_MSF,
++                  0, 0, 0, 0,
++                  -1,0, 0, 0,
++                  -1,0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_GET_EVENT_STATUS_NOTIFICATION,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_PAUSE_RESUME,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_STOP_PLAY_SCAN,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_DISC_INFO,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_READ_TRACK_RZONE_INFO,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_RESERVE_RZONE_TRACK,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SEND_OPC,
++                  0, 7, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_MODE_SELECT_10,
++                  0, 7, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_REPAIR_RZONE_TRACK,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_MODE_SENSE_10,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_CLOSE_TRACK,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_BUFFER_CAPACITY,
++                  0, 0, 0, 0,
++                  0, 7, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_SEND_CUE_SHEET,
++                  0, 6, 3, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_BLANK,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SEND_EVENT,
++                  0, 8, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SEND_KEY,
++                  0, 8, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_REPORT_KEY,
++                  0, 0, 0, 0,
++                  0, 8, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_LOAD_UNLOAD,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SET_READ_AHEAD,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_12,
++                  0, 0, 0, 0,
++                  0, 6, 4, CDFSZ,
++                  -1,0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_WRITE_12,
++                  0, 6, 4, CDFSZ,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_GET_PERFORMANCE,
++                  0, 0, 0, 0,
++                  0, 8, 2, 1,
++                  4, 0, 4, 1),
++    SET_ATAPI_CMD(GPCMD_READ_DVD_STRUCTURE,
++                  0, 0, 0, 0,
++                  0, 8, 2, 1,
++                  2, 0, 2, 1),
++    SET_ATAPI_CMD(GPCMD_SET_STREAMING,
++                  0, 9, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_READ_CD_MSF,
++                  0, 0, 0, 0,
++                  -1,0, 0, 0,
++                  -1,0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SCAN,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SET_SPEED,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_PLAY_CD,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_MECHANISM_STATUS,
++                  0, 0, 0, 0,
++                  0, 8, 2, 1,
++                  8, 6, 2, 1),
++    SET_ATAPI_CMD(GPCMD_READ_CD,
++                  0, 0, 0, 0,
++                  0, 6, 3, 1,
++                  -1,0, 0, 0),
++    SET_ATAPI_CMD(GPCMD_SEND_DVD_STRUCTURE,
++                  0, 8, 2, 1,
++                  0, 0, 0, 0,
++                  0, 0, 0, 0),
 +    /* 0xC0 - 0xFF: intentionaly left blank */
 +};
 +
@@ -2068,7 +2294,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    return bdrv_ioctl(bs, ATAPI_PT_SG_GET_RESERVED_SIZE, buf);
 +}
 +
-+#if defined(ATAPI_PT_DEBUG)
 +static inline char const *atapi_cmd_to_str(uint8_t const cmd)
 +{
 +    if (atapi_cmd_table[cmd].name == NULL) {
@@ -2077,7 +2302,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +    return atapi_cmd_table[cmd].name;
 +}
-+#endif
 +
 +#define MSF_TO_FRAMES(M, S, F) (((M) * CD_SECS + (S)) * CD_FRAMES + (F))
 +
@@ -2116,96 +2340,95 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 + * constant + (base * block_size)
 + *
 + * This function help us to compute the size */
-+static uint32_t
-+atapi_pt_get_data_size(enum atapi_pt_recipe_select size_select,
-+               uint8_t command, uint8_t * data)
++static uint32_t atapi_pt_get_data_size(enum atapi_pt_recipe_select size_select,
++                                       uint8_t command, uint8_t * data)
 +{
 +    struct atapi_pt_size_recipes const *size_devfn = NULL;
 +    uint32_t size = 0;
 +
 +    if (atapi_cmd_table[command].name == 0) {
-+        ATAPI_DPRINTF("Invalide command (\e[0;34m0x%02x\e[m)", command);
++        PT_LOG("invalid command=0x%02x\n", command);
 +        return -1;
 +    }
 +
 +    /* Get the size recipe */
 +    switch (size_select) {
-+    case ide_atapi_pt_size_dout:
-+        size_devfn = &atapi_cmd_table[command].dout_recipe;
-+        break;
-+    case ide_atapi_pt_size_buffer:
-+        size_devfn = &atapi_cmd_table[command].buffer_recipe;
-+        break;
-+    case ide_atapi_pt_size_din:
-+        size_devfn = &atapi_cmd_table[command].din_recipe;
-+        break;
-+    default:
-+        ATAPI_DPRINTF("Invalid data size selection %d", size_select);
-+        return -1;
++        case ide_atapi_pt_size_dout:
++            size_devfn = &atapi_cmd_table[command].dout_recipe;
++            break;
++        case ide_atapi_pt_size_buffer:
++            size_devfn = &atapi_cmd_table[command].buffer_recipe;
++            break;
++        case ide_atapi_pt_size_din:
++            size_devfn = &atapi_cmd_table[command].din_recipe;
++            break;
++        default:
++            PT_LOG("invalid data size selection=%d\n", size_select);
++            return -1;
 +    }
 +
 +    /* Determine the base size. */
 +    switch (size_devfn->len_size) {
-+    case 0:        /* If no specified len size, keep 0 */
-+        size = 0;
-+        break;
-+    case 1:        /* Get a size on 8 bits from the command buffer */
-+        size = data[size_devfn->len_offset];
-+        break;
-+    case 2:        /* Get a size on 16bits from the command buffer */
-+        size = ube16_to_cpu(data + size_devfn->len_offset);
-+        break;
-+    case 3:        /* Get a size on 24bits from the command buffer */
-+        size = ube24_to_cpu(data + size_devfn->len_offset);
-+        break;
-+    case 4:        /* Get a size on 32bits from the command buffer */
-+        size = ube32_to_cpu(data + size_devfn->len_offset);
-+        break;
-+    default:
-+        ATAPI_DPRINTF
-+            ("Invalid data size length in table, command(0x%02x)"
-+             " select(%d), size(%d)\n", command, size_select,
-+             size_devfn->len_size);
-+        return -1;
++        case 0:
++            /* If no specified len size, keep 0 */
++            size = 0;
++            break;
++        case 1:
++            /* Get a size on 8 bits from the command buffer */
++            size = data[size_devfn->len_offset];
++            break;
++        case 2:
++            /* Get a size on 16bits from the command buffer */
++            size = ube16_to_cpu(data + size_devfn->len_offset);
++            break;
++        case 3:
++            /* Get a size on 24bits from the command buffer */
++            size = ube24_to_cpu(data + size_devfn->len_offset);
++            break;
++        case 4:
++            /* Get a size on 32bits from the command buffer */
++            size = ube32_to_cpu(data + size_devfn->len_offset);
++            break;
++        default:
++            PT_LOG("invalid data size len - cmd=0x%02x select=%d size=%d\n",
++                   command, size_select, size_devfn->len_size);
++            return -1;
 +    }
 +
-+    /* Compute the size of data:
-+     * (base * block_size) + len_const */
++    /* Compute the size of data: (base * block_size) + len_const */
 +    size *= size_devfn->block_size;
 +    size += size_devfn->len_const;
 +    return size;
 +}
 +
 +/* This function set an error on the IDE Bus, the guest will be notified */
-+static void atapi_pt_set_error(IDEState * s,
-+                   int sense_key, int asc, int ascq, int error)
++static void atapi_pt_set_error(IDEState *s,
++                               int sense_key, int asc, int ascq, int error)
 +{
 +    ATAPIPassThroughState *as = s->atapipts;
-+    memset(&as->sense, 0, 18);
-+    *((char *)&as->sense) = 0x70;
++    memset(&as->sense, 0, sizeof(as->sense));
++    as->sense.error_code = 0x70;
 +    as->sense.sense_key = sense_key;
 +    as->sense.asc = asc;
 +    as->sense.ascq = ascq;
 +    as->sense.error_code = error;
 +    as->sense.add_sense_len = 10;
 +
-+    ATAPI_DUMP_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
++    PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
 +
 +    s->status = READY_STAT | ERR_STAT;
-+    s->nsector =
-+        (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
++    s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
 +    ide_set_irq(s->bus);
 +}
 +
-+static void atapi_pt_error(IDEState * s)
++static void atapi_pt_error(IDEState *s)
 +{
 +    s->status = READY_STAT | ERR_STAT;
-+    s->nsector =
-+        (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
++    s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
 +    ide_set_irq(s->bus);
 +}
 +
-+static int atapi_pt_do_dispatch(volatile IDEState * s)
++static int atapi_pt_do_dispatch(volatile IDEState *s)
 +{
 +    int r = 0;
 +    struct sg_io_v4 cmd;
@@ -2219,14 +2442,15 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    uint8_t request[ATAPI_PACKET_SIZE];
 +    ATAPIPassThroughState *as = s->atapipts;
 +
-+    ATAPI_DPRINTF("dispatch for %s\n", atapi_cmd_to_str(as->request[0]));
++    PT_LOG("dispatch for %s\n", atapi_cmd_to_str(as->request[0]));
 +
 +    memcpy(request, (void *)as->request, sizeof(request));
++
 +    is_dout = (as->dout_xfer_len > 0) ? 1 : 0;
 +    cmd_len_p = is_dout ? &(cmd.dout_xfer_len) : &(cmd.din_xfer_len);
 +    req_len_p = is_dout ? &(as->dout_xfer_len) : &(as->din_xfer_len);
 +
-+    memset(&cmd, 0, sizeof(struct sg_io_v4));
++    memset(&cmd, 0, sizeof(cmd));
 +    cmd.guard = 'Q';    /* To differentiate from v3 */
 +    cmd.protocol = BSG_PROTOCOL_SCSI;
 +    cmd.subprotocol = BSG_SUB_PROTOCOL_SCSI_CMD;
@@ -2241,19 +2465,19 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        cmd.din_xferp = (uintptr_t) (s->io_buffer + seg_offset);
 +        cmd.dout_xferp = (uintptr_t) (s->io_buffer + seg_offset);
 +        *cmd_len_p = (as->max_xfer_len > (*req_len_p - seg_offset)) ?
-+            (*req_len_p - seg_offset) : as->max_xfer_len;
++                     (*req_len_p - seg_offset) : as->max_xfer_len;
 +
 +        if (*req_len_p > as->max_xfer_len) {
 +            if ((as->request[0] == GPCMD_WRITE_10) ||
 +                (as->request[0] == GPCMD_WRITE_AND_VERIFY_10) ||
 +                (as->request[0] == GPCMD_READ_10)) {
-+                ATAPI_DPRINTF
-+                    ("'%s' total(%d) seg(%d:%d), remaining: %d\n",
-+                     atapi_cmd_to_str(as->request[0]),
-+                     *req_len_p, segment, *cmd_len_p,
-+                     *req_len_p - seg_offset - *cmd_len_p);
++                PT_LOG("'%s' total(%d) seg(%d:%d), remaining: %d\n",
++                       atapi_cmd_to_str(as->request[0]),
++                       *req_len_p, segment, *cmd_len_p,
++                       *req_len_p - seg_offset - *cmd_len_p);
 +
 +                segment++;
++
 +                /* Adjust LBA offset and length */
 +                lba = ube32_to_cpu((uint8_t *) as->request + 2);
 +                lba += seg_offset / CD_FRAMESIZE;
@@ -2261,28 +2485,22 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +                len = *cmd_len_p / CD_FRAMESIZE;
 +                cpu_to_ube16(request + 7, len);
 +
-+                ATAPI_DPRINTF
-+                    ("adjust lba from %d to %d, length from %d to %d\n",
-+                     ube32_to_cpu((uint8_t *) as->request + 2),
-+                     lba,
-+                     ube16_to_cpu((uint8_t *) as->request + 7),
-+                     len);
++                PT_LOG("adjust lba from %d to %d, length from %d to %d\n",
++                       ube32_to_cpu((uint8_t *) as->request + 2), lba,
++                       ube16_to_cpu((uint8_t *) as->request + 7), len);
 +            } else {
-+                ATAPI_DPRINTF
-+                    ("FAILING OVERLONG '%s' (%d, max: %d)\n",
-+                     atapi_cmd_to_str(as->request[0]),
-+                     *req_len_p, as->max_xfer_len);
-+                atapi_pt_set_error((IDEState *) s,
-+                           SENSE_ILLEGAL_REQUEST,
-+                           ASC_INV_FIELD_IN_CMD_PACKET,
-+                           0, 0x70);
++                PT_LOG("failing overlong cmd=%s (%d, max: %d)\n",
++                       atapi_cmd_to_str(as->request[0]),
++                       *req_len_p, as->max_xfer_len);
++                atapi_pt_set_error((IDEState *) s, SENSE_ILLEGAL_REQUEST,
++                                   ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
 +                r = -1;
 +            }
 +        }
 +        seg_offset += *cmd_len_p;
 +
 +        if (cmd.timeout != 15000) {
-+            ATAPI_DPRINTF("Timeout %d msec", cmd.timeout);
++            PT_LOG("timeout=%d msec\n", cmd.timeout);
 +        }
 +
 +        if (!r) {
@@ -2299,40 +2517,29 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        } else {
 +            as->result = 0;
 +        }
-+        ATAPI_DPRINTF("ioctl(%d) driver(%d) transport(%d) device(%d)",
-+                  r, cmd.driver_status, cmd.transport_status,
-+                  cmd.device_status);
-+        ATAPI_DPRINTF("result(%d) req_len(%d) seg_offset(%d)"
-+                  "last_segment(%s)",
-+                  as->result, *req_len_p, seg_offset,
-+                  (*req_len_p > seg_offset) ? "no" : "yes");
++        PT_LOG("ioctl=%d driver=%d transport=%d device=%d=\n",
++               r, cmd.driver_status, cmd.transport_status, cmd.device_status);
++        PT_LOG("result=%d req_len=%d seg_offset=%d last_segment=%s\n",
++               as->result, *req_len_p, seg_offset,
++               (*req_len_p > seg_offset) ? "no" : "yes");
 +    } while ((!as->result) && (*req_len_p > seg_offset));
-+    /* --------------------------------------------------------------------- */
 +
 +    if (as->result) {
-+        char *p = (char *)&as->sense;
-+
-+        switch (p[0] & 0x7F) {
++        switch (as->sense.error_code) {
 +        case 0x70 ... 0x71:
-+            ATAPI_DPRINTF
-+                ("[\e[1;31mERROR(%s)\e[m] sense(0x%02x,%02x,%02x)(%s)",
-+                 atapi_cmd_to_str(as->request[0]),
-+                 as->sense.sense_key, as->sense.asc, as->sense.ascq,
-+                 atapi_sense_to_str(as->sense.sense_key,
-+                        as->sense.asc, as->sense.ascq));
++            PT_DEBUG("command error:\n");
++            PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
 +            break;
 +        case 0x72 ... 0x73:
-+            ATAPI_DPRINTF
-+                ("[\e[1;31mERROR SPC-3(%s)\e[m] sense(0x%02x,%02x,%02x)(%s)",
-+                 atapi_cmd_to_str(as->request[0]), p[1] & 0xF, p[2],
-+                 p[3], atapi_sense_to_str(p[1] & 0xF, p[2], p[3]));
-+            ATAPI_DPRINTF("Suppressing error\n");
++            char *p = (char *)&as->sense;
++            PT_DEBUG("command spc-3 error:\n");
++            PT_DEBUG_SENSE(p[1] & 0xF, p[2], p[3]);
++            PT_LOG("suppressing error\n");
 +            as->result = 0;
 +            break;
 +        default:
-+            ATAPI_DPRINTF
-+                ("[\e[1;31mERROR - unrecognised sense format\e[m] (%s)\n",
-+                 atapi_cmd_to_str(as->request[0]));
++            PT_LOG("error: unrecognised sense format str=%s\n",
++                   atapi_cmd_to_str(as->request[0]));
 +            break;
 +        }
 +    }
@@ -2347,7 +2554,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    volatile IDEState *s = (volatile IDEState *)arg;
 +    ATAPIPassThroughState *as = s->atapipts;
 +
-+    ATAPI_DPRINTF("atapi pt thread worker started!\n");
++    PT_LOG("atapi pt thread worker started!\n");
 +
 +    while (as->thread_continue) {
 +        if (event_notifier_wait_and_clear(&as->e_cmd, 0) == 1) {
@@ -2356,83 +2563,28 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        }
 +    }
 +
-+    ATAPI_DPRINTF("atapi pt thread worker bailed!\n");
++    PT_LOG("atapi pt thread worker bailed!\n");
 +
 +    qemu_thread_exit(NULL);
 +    return NULL;
 +}
-+#if 0
-+static void set_reply_no_change(IDEState *s)
-+{
-+  s->io_buffer[2] = 4;
-+  s->io_buffer[4] = MEC_NO_CHANGE;
-+  s->io_buffer[5] = MS_NO_CHANGE;
-+  s->io_buffer[6] = 0;
-+  s->io_buffer[7] = 0;
-+}
-+
-+static void set_reply_status_media(IDEState *s, uint8_t *buf)
-+{
-+  uint8_t event_code, media_status;
-+
-+  media_status = MS_NO_CHANGE;
-+  event_code   = MEC_NO_CHANGE;
-+
-+  if (s->atapi_pt.notify_eject_request) {
-+    media_status = MS_TRAY_OPEN;
-+    event_code = MEC_EJECT_REQUEST;
-+    s->atapi_pt.notify_eject_request = false;
-+  } else if (s->atapi_pt.notify_media_removed) {
-+    media_status = MS_TRAY_OPEN;
-+    event_code = MEC_MEDIA_REMOVE;
-+    s->atapi_pt.notify_media_removed = false;
-+  } else if (s->atapi_pt.notify_new_media) {
-+    media_status = MS_MEDIA_PRESENT;
-+    event_code = MEC_NEW_MEDIA;
-+    s->atapi_pt.notify_new_media = false;
-+  }
-+
-+  buf[2] = 4;
-+  buf[4] = event_code;
-+  buf[5] = media_status;
-+  buf[6] = 0;
-+  buf[7] = 0;
-+  ATAPI_DPRINTF("[ATAPI] media status notification %d %d %d\n", 4, event_code, media_status);
-+}
-+#endif
 +
 +static void event_status_notification_complete(IDEState *s)
 +{
 +    uint8_t *b = s->io_buffer;
 +    int ev_class = b[2];
 +    int ev_code = b[4];
++
 +    if (ev_class == 4 && ev_code == MEC_NEW_MEDIA) {
 +        /* This is a "new media" message coming from actual drive */
-+        ATAPI_DPRINTF("[ATAPI] new media detected\n");
++        PT_LOG("new media detected\n");
 +        ptcmd_set_global_media_state(s->bs, true);
 +    }
 +
 +    if (ev_class == 4 && ev_code == MEC_MEDIA_REMOVAL) {
 +        /* This is a "media removed" message coming from actual drive */
-+        ATAPI_DPRINTF("[ATAPI] media removed\n");
++        PT_LOG("media removed\n");
 +        ptcmd_set_global_media_state(s->bs, false);
-+    }
-+
-+    /* XXX: this ev_code check differs from orig q14 patch check for b[5]==2 */
-+    if ((ev_class == 4 && ev_code == MEC_NO_CHANGE) ||
-+        (b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0))
-+    {
-+        /* This is no change message, we spoof it with fabricated media events if needed */
-+#if 0
-+        set_reply_status_media(s, b);
-+#endif
-+        ATAPI_DPRINTF("[ATAPI] virtual event\n");
-+    } else {
-+        /* don't propagate real events */
-+#if 0
-+        set_reply_no_change(s);
-+#endif
-+        ATAPI_DPRINTF("[ATAPI] ignoring real event\n");
 +    }
 +}
 +
@@ -2443,13 +2595,13 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 + * 'atapi_pt_worker_thread', notify the guest of the return status of the SG_IO
 + * and handle error */
 +static void atapi_pt_event_read(struct EventNotifier *e)
-+{                /* Mop up result */
++{
 +    IDEState *s = (IDEState *) e->opaque;
 +    ATAPIPassThroughState *as = s->atapipts;
 +    uint32_t din_actual;
 +    bool glob_media_present;
 +
-+    ATAPI_DPRINTF("event read!\n");
++    PT_DEBUG("event read!\n");
 +
 +    event_notifier_test_and_clear(&as->e_ret);
 +
@@ -2459,7 +2611,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        if ((as->sense.sense_key == SENSE_NOT_READY) &&
 +            (as->sense.asc == ASC_MEDIUM_NOT_PRESENT)) {
 +            if (glob_media_present) {
-+                ATAPI_DPRINTF("[ATAPI] sense no medium - media must be absent?\n");
++                PT_DEBUG("sense no medium - media must be absent?\n");
 +                ptcmd_set_global_media_state(s->bs, false);
 +            }
 +        }
@@ -2474,13 +2626,13 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        (as->request[0] == GPCMD_READ_12) ||
 +        (as->request[0] == GPCMD_READ_DISC_INFO)) {
 +        if (!glob_media_present) {
-+            ATAPI_DPRINTF("[ATAPI] read command detected - media must be present?\n");
++            PT_DEBUG("read command detected - media must be present?\n");
 +            ptcmd_set_global_media_state(s->bs, true);
 +        }
 +    }
 +
 +    if (as->request[0] == GPCMD_GET_EVENT_STATUS_NOTIFICATION) {
-+        ATAPI_DPRINTF("[ATAPI] event status notification command\n");
++        PT_DEBUG("event status notification command\n");
 +        event_status_notification_complete(s);
 +    }
 +
@@ -2491,7 +2643,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    }
 +
 +    din_actual = atapi_pt_get_data_size(ide_atapi_pt_size_din,
-+                        as->request[0], s->io_buffer);
++                                        as->request[0], s->io_buffer);
 +
 +    /* din_xfer_len is the size of the buffer provided for the din data,
 +     * din_actual in the size of the data the LU tried to send to us. Either one
@@ -2508,20 +2660,19 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            break;
 +        case 1:    // vendor specific
 +        default:
-+            ATAPI_DPRINTF("Illegal read buffer mode %d",
-+                      s->io_buffer[1] & 7);
++            PT_LOG("illegal read buffer mode %d\n", s->io_buffer[1] & 7);
 +            atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                       ASC_INV_FIELD_IN_CMD_PACKET, 0,
-+                       0x70);
++                               ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
 +            return;
 +        }
 +    }
 +
-+    if (din_actual == (__u32) - 1)
++    if (din_actual == (__u32) - 1) {
 +        din_actual = as->din_xfer_len;
++    }
 +
-+    ATAPI_DPRINTF("Read %d bytes of data (buffer size %d)",
-+              din_actual, as->din_xfer_len);
++    PT_DEBUG("read %d bytes of data (buffer size %d)\n", din_actual,
++                                                         as->din_xfer_len);
 +
 +    ide_atapi_cmd_reply(s, din_actual, as->din_xfer_len);
 +}
@@ -2529,78 +2680,64 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +int atapi_pt_init(IDEState * s)
 +{
 +    ATAPIPassThroughState *as = NULL;
-+    int ret = 0, error = 0;
++    int error = 0;
 +
-+    /* -- ATAPI Pass Through State initialization -------------------------- */
 +    as = g_malloc(sizeof(ATAPIPassThroughState));
-+    if (NULL == as) {
-+        ATAPI_DPRINTF("no space left on RAM for the device");
-+        goto atapi_pt_init_failed;
++    if (as == NULL) {
++        PT_LOG("malloc failed!\n");
++        return -1;
 +    }
++
 +    memset(as, 0, sizeof(ATAPIPassThroughState));
 +    s->atapipts = as;
-+    /* --------------------------------------------------------------------- */
 +
-+    /* -- Create event notifier --------------------------------------------- */
-+    error =
-+        event_notifier_init(&as->e_cmd, 0 /* Do not activate it now */ );
++    /* create event notifier */
++    error = event_notifier_init(&as->e_cmd, 0 /* Do not activate it now */ );
 +    if (error != 0) {
-+        ATAPI_DPRINTF("[%s] unable to creat EventNotifier",
-+                  strerror(error));
-+        goto atapi_pt_init_clean;
++        PT_LOG("[%s] unable to create EventNotifier", strerror(error));
++        g_free(as);
++        return -1;
 +    }
-+    error =
-+        event_notifier_init(&as->e_ret, 0 /* Do not activate it now */ );
-+    if (error != 0) {
-+        ATAPI_DPRINTF("[%s] unable to creat EventNotifier",
-+                  strerror(error));
-+        goto atapi_pt_init_clean;
-+    }
-+    /* --------------------------------------------------------------------- */
 +
-+    /* -- Create the worker thread ----------------------------------------- */
++    error = event_notifier_init(&as->e_ret, 0 /* Do not activate it now */ );
++    if (error != 0) {
++        PT_LOG("[%s] unable to create EventNotifier", strerror(error));
++        g_free(as);
++        return -1;
++    }
++
++    /* setup worker thread */
 +    as->thread_continue = true;
 +    qemu_thread_create(&(as->thread), atapi_pt_worker_thread,
-+               s, QEMU_THREAD_JOINABLE);
-+    /* No error checking, qemu_thread_create exit on fail */
-+    /* --------------------------------------------------------------------- */
++                       s, QEMU_THREAD_JOINABLE);
 +
-+    /* -- Get the reserved size --------------------------------------------
++    /*
++     * Get the reserved size:
 +     * Find out the maximum block size the hardware supports. This is needed
 +     * for USB drives where it is 120kb (less than the normal 128kb for some
-+     * reason) */
++     * reason)
++     */
 +    if (ptcmd_do_sg_get_reserved_size(s->bs, &(as->max_xfer_len))) {
-+        ATAPI_DPRINTF
-+            ("[%s] unable to send an IOCTL (GET_RESERVED_SIZE)",
-+             strerror(errno));
-+        goto atapi_pt_init_kill_thread;
++        PT_LOG("SG_GET_RESERVED_SIZE failed: %s\n", strerror(errno));
++        as->thread_continue = false;
++        event_notifier_cleanup(&as->e_cmd);
++        event_notifier_cleanup(&as->e_ret);
++        g_free(as);
++        return -1;
 +    }
 +    as->max_xfer_len = (as->max_xfer_len + CD_FRAMESIZE - 1) &
-+        ~(CD_FRAMESIZE - 1);
-+    /* --------------------------------------------------------------------- */
++                        ~(CD_FRAMESIZE - 1);
 +
 +    as->e_ret.opaque = s;
 +    event_notifier_set_handler(&as->e_ret, atapi_pt_event_read);
-+    goto atapi_pt_init_end;
 +
-+ atapi_pt_init_kill_thread:
-+    as->thread_continue = false;
-+    event_notifier_cleanup(&as->e_cmd);
-+    event_notifier_cleanup(&as->e_ret);
-+ atapi_pt_init_clean:
-+    g_free(as);
-+ atapi_pt_init_failed:
-+    ret = -1;
-+ atapi_pt_init_end:
-+    ATAPI_DPRINTF("Initialization %s", (ret == 0) ? "succeed" : "failed");
-+    return ret;
++    PT_LOG("initialization complete\n");
++    return 0;
 +}
-+
-+/* -- Command functions ---------------------------------------------------- */
 +
 +static void atapi_pt_do_sg_io(IDEState * s)
 +{
-+    /* POKE The worker thread to send command using SG_IO ioctl */
++    /* poke worker thread */
 +    event_notifier_set(&s->atapipts->e_cmd);
 +}
 +
@@ -2630,7 +2767,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    if (s->atapi_dma) {
 +        s->io_buffer_size = s->atapipts->dout_xfer_len;
 +        s->bus->dma->ops->start_dma(s->bus->dma, s,
-+                        atapi_pt_dout_fetch_dma_done);
++                                    atapi_pt_dout_fetch_dma_done);
 +    } else {        /* PIO */
 +        s->packet_transfer_size = s->atapipts->dout_xfer_len;
 +        s->io_buffer_size = 0;
@@ -2638,9 +2775,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        s->status |= DRQ_STAT;
 +        s->status &= ~BUSY_STAT;
 +        s->nsector = (s->nsector & ~7) &
-+            ~ATAPI_INT_REASON_IO & ~ATAPI_INT_REASON_CD;
++                     ~ATAPI_INT_REASON_IO & ~ATAPI_INT_REASON_CD;
 +        ide_transfer_start(s, s->io_buffer, s->atapipts->dout_xfer_len,
-+                   atapi_pt_dout_fetch_pio_done);
++                           atapi_pt_dout_fetch_pio_done);
 +        ide_set_irq(s->bus);
 +    }
 +}
@@ -2665,7 +2802,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        case 0xf8:
 +            block_size = 2352;
 +            break;
-+
 +        default:
 +            return -1;    // illegal
 +        }
@@ -2721,7 +2857,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        case 0xf8:
 +            block_size = 2352;
 +            break;
-+
 +        default:
 +            return -1;    // illegal
 +        }
@@ -2765,7 +2900,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        case 0xf8:
 +            block_size = 2352;
 +            break;
-+
 +        default:
 +            return -1;    // illegal
 +        }
@@ -2815,7 +2949,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        case 0xf8:
 +            block_size = 2352;
 +            break;
-+
 +        default:
 +            return -1;    // illegal
 +        }
@@ -2857,7 +2990,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        case 0xf8:
 +            block_size = 2352;
 +            break;
-+
 +        default:
 +            return -1;    // illegal
 +        }
@@ -2868,18 +3000,97 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    }
 +
 +    switch (error_flags) {
-+    case 1:
-+        block_size += 294;
-+        break;
-+    case 2:
-+        block_size += 296;
-+        break;
-+
-+    default:
-+        break;
++        case 1:
++            block_size += 294;
++            break;
++        case 2:
++            block_size += 296;
++            break;
++        default:
++            break;
 +    }
 +
 +    return block_size;
++}
++
++static bool atapi_pt_cmd_requires_write(uint8_t cmd)
++{
++    switch (cmd)
++    {
++        case GPCMD_BLANK:
++        case GPCMD_CLOSE_TRACK:
++        case GPCMD_FLUSH_CACHE:
++        case GPCMD_FORMAT_UNIT:
++        case GPCMD_SEND_DVD_STRUCTURE:
++        case GPCMD_SEND_OPC:
++        case GPCMD_WRITE_10:
++        case GPCMD_WRITE_12:
++        case GPCMD_WRITE_AND_VERIFY_10:
++        case GPCMD_WRITE_BUFFER:
++            return true;
++    }
++
++    return false;
++}
++
++static void atapi_pt_fake_sense(IDEState *s)
++{
++    ATAPIPassThroughState *as = s->atapipts;
++    int max_len = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
++                                         GPCMD_REQUEST_SENSE, as->request);
++
++    memset(&as->sense, 0, sizeof(as->sense));
++    //as->sense.valid = 1;
++    as->sense.error_code = 0x70;
++    as->sense.sense_key = NOT_READY;
++    as->sense.add_sense_len = 10;
++    as->sense.asc = ASC_MEDIUM_NOT_PRESENT;
++    as->sense.ascq = 0;
++
++    PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
++
++    memcpy(s->io_buffer, &as->sense, sizeof(as->sense));
++    ide_atapi_cmd_reply(s, 18, max_len);
++}
++
++static void atapi_pt_fake_inquiry(IDEState * s)
++{
++    ATAPIPassThroughState *as = s->atapipts;
++
++    /* TODO: explain me */
++    uint8_t inquiry_data[96] = {0x05, 0x80, 0x05, 0x32,
++                                0x5b, 0x00, 0x00, 0x00,
++                                0x48, 0x4c, 0x2d, 0x44,
++                                0x54, 0x2d, 0x53, 0x54,
++                                0x43, 0x44, 0x52, 0x57,
++                                0x44, 0x56, 0x44, 0x20,
++                                0x4d, 0x55, 0x31, 0x30,
++                                0x4e, 0x20, 0x20, 0x20,
++                                0x41, 0x31, 0x30, 0x36,
++                                0x41, 0x42, 0x4c, 0x44,
++                                0x41, 0x20, 0x20, 0x20,
++                                0x30, 0x38, 0x2f, 0x31,
++                                0x31, 0x2f, 0x31, 0x38,
++                                0x20, 0x20, 0x20, 0x00,
++                                0x01, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00,
++                                0x00, 0x00, 0x00, 0x00};
++
++    PT_DEBUG("sending fake inquiry reply\n");
++
++    memcpy(s->io_buffer, inquiry_data, sizeof(inquiry_data));
++
++    ide_atapi_cmd_reply(s, sizeof(inquiry_data), as->din_xfer_len);
++
++    /* clear sense data */
++    memset(&as->sense, 0, sizeof(as->sense));
 +}
 +
 +void atapi_pt_cmd(IDEState * s)
@@ -2893,103 +3104,107 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    as->timeout = 15000;
 +    s->status |= BUSY_STAT;
 +
-+    ATAPI_DPRINTF("performing command = %s", atapi_cmd_to_str(cmd_code));
-+
-+    if (cmd_code == GPCMD_REQUEST_SENSE && ((char *)&as->sense)[0] != 0) {
-+        int max_size = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
-+                              GPCMD_REQUEST_SENSE,
-+                              as->request);
-+
-+        int size = atapi_pt_get_data_size(ide_atapi_pt_size_din,
-+                          GPCMD_REQUEST_SENSE,
-+                          (uint8_t *) & as->sense);
-+
-+        memcpy(s->io_buffer, &as->sense, sizeof(as->sense));
-+
-+        ide_atapi_cmd_reply(s, size, max_size);
-+
-+        ATAPI_DUMP_SENSE(as->sense.sense_key, as->sense.asc,
-+                 as->sense.ascq);
-+        // Make sure we don't send the same reply again
-+        *(char *)(&as->sense) = '\0';
-+        return;
-+    }
-+    // Make sure we don't re-use an old Request Sense reply
-+    // if another command was processed in between
-+    *(char *)(&as->sense) = '\0';
-+
 +    as->dout_xfer_len = atapi_pt_get_data_size(ide_atapi_pt_size_dout,
-+                           cmd_code, as->request);
++                                               cmd_code, as->request);
 +
 +    as->din_xfer_len = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
-+                          cmd_code, as->request);
++                                              cmd_code, as->request);
 +
-+    /* Claim exclusive use if we're doing any kind of writing */
-+    if ((cmd_code == GPCMD_BLANK) || (cmd_code == GPCMD_CLOSE_TRACK) ||
-+        (cmd_code == GPCMD_FLUSH_CACHE) || (cmd_code == GPCMD_FORMAT_UNIT)
-+        || (cmd_code == GPCMD_SEND_DVD_STRUCTURE)
-+        || (cmd_code == GPCMD_SEND_OPC) || (cmd_code == GPCMD_WRITE_10)
-+        || (cmd_code == GPCMD_WRITE_12)
-+        || (cmd_code == GPCMD_WRITE_AND_VERIFY_10)
-+        || (cmd_code == GPCMD_WRITE_BUFFER)) {
-+        if (bdrv_is_read_only(s->bs)) {
-+            atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                       ASC_ILLEGAL_OPCODE, 0, 0x70);
-+            ATAPI_DPRINTF("Unable to perform(%s): readonly device",
-+                      atapi_cmd_to_str(cmd_code));
-+            return;
++    PT_DEBUG("sending command: 0x%02x (%s) dma=%d timeout=%u din=%d dout=%d\n",
++           cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma, as->timeout,
++           as->din_xfer_len, as->dout_xfer_len);
++
++    if (DEBUG_ATAPI_PT) {
++        atapi_pt_dump_hexa(as->request, ATAPI_PACKET_SIZE);
++    }
++
++    /* emulate commands when we don't have exclusive media lock */
++    if (!ptcmd_get_global_media_lock(s->bs)) {
++        switch (cmd_code)
++        {
++            case GPCMD_INQUIRY:
++                atapi_pt_fake_inquiry(s);
++                return;
++            case GPCMD_REQUEST_SENSE:
++                atapi_pt_fake_sense(s);
++                return;
++            /* XXX: the below were allowed through in ioemu patch */
++            case GPCMD_GET_CONFIGURATION:
++            case GPCMD_GET_EVENT_STATUS_NOTIFICATION:
++            case GPCMD_TEST_UNIT_READY:
++            case GPCMD_GET_PERFORMANCE:
++            case GPCMD_MECHANISM_STATUS:
++            case GPCMD_MODE_SENSE_10:
++            case GPCMD_REPORT_KEY:
++            case GPCMD_READ_CDVD_CAPACITY:
++            case GPCMD_READ_FORMAT_CAPACITIES:
++            default:
++                /* error with medium not present for commands requiring lock */
++                PT_LOG("refusing command: 0x%02x (%s) dma=%d timeout=%u\n",
++                       cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
++                       s->atapipts->timeout);
++
++                atapi_pt_set_error(s, SENSE_NOT_READY,
++                                   ASC_MEDIUM_NOT_PRESENT, 0, 0x70);
++                return;
 +        }
 +    }
 +
-+    if (cmd_code == GPCMD_START_STOP_UNIT) {
++    /* check that we have write permissions before continuing write cmds */
++    if (bdrv_is_read_only(s->bs) && atapi_pt_cmd_requires_write(cmd_code)) {
++        atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
++                           ASC_ILLEGAL_OPCODE, 0, 0x70);
++        PT_LOG("error: unable to perform cmd=%s: readonly device\n",
++               atapi_cmd_to_str(cmd_code));
++        return;
++    }
++
++    /* commands need special attention */
++    switch (cmd_code) {
++    case GPCMD_START_STOP_UNIT:
++        /* ignore stop motor command that windows issues on shutdown */
 +        if ((as->request[4] & 0x3) == 0x0) {
-+            // Stop motor command: Win7 guest sends this on shutdown,
-+            // we ignore this so other VM's don't get shafted
-+            ATAPI_DPRINTF
-+                ("Stop motor command: win7 sends this on shutdown");
++            PT_LOG("stop motor command ignored\n");
 +            ide_atapi_cmd_ok(s);
 +            return;
 +        }
-+    }
++        break;
++    case GPCMD_REQUEST_SENSE:
++        /* if we previously caught an error, report it */
++        if (as->sense.error_code != 0) {
++            int max_size = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
++                                                  GPCMD_REQUEST_SENSE, as->request);
++            int size = atapi_pt_get_data_size(ide_atapi_pt_size_din,
++                                              GPCMD_REQUEST_SENSE,
++                                              (uint8_t *) &as->sense);
 +
-+    if (!ptcmd_get_global_media_lock(s->bs)) {
-+        ATAPI_DPRINTF("refusing command: 0x%02x (\e[0;32m%s\e[m) dma=%d"
-+                          " timeout(%u)",
-+                          cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
-+                          s->atapipts->timeout);
-+        atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                           ASC_INV_FIELD_IN_CMD_PACKET, 0,
-+                           0x70);
-+        return;
-+    }
++            memcpy(s->io_buffer, &as->sense, sizeof(as->sense));
 +
-+    ATAPI_DPRINTF("sending command: 0x%02x (\e[0;32m%s\e[m) dma=%d"
-+              " timeout(%u)",
-+              cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma,
-+              s->atapipts->timeout);
-+#if defined(ATAPI_PT_DEBUG)
-+    atapi_pt_dump_hexa(as->request, ATAPI_PACKET_SIZE);
-+#endif
++            PT_LOG("GPCMD_REQUEST_SENSE - reporting previous error\n");
++            PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
++            ide_atapi_cmd_reply(s, size, max_size);
 +
-+    /* A few commands need special attention */
-+    switch (cmd_code) {
++            /* reported the error, now clear it */
++            as->sense.error_code = 0;
++            return;
++        }
 +    //case GPCMD_SET_STREAMING:
 +    case GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
-+        // we don't allow locking, to prevent a VM from hogging the drive
-+        ATAPI_DPRINTF("Don't allow(%s)", atapi_cmd_to_str(cmd_code));
++        /* we don't allow locking, to prevent a VM from hogging the drive */
++        PT_LOG("ignoring (%s)", atapi_cmd_to_str(cmd_code));
 +        ide_atapi_cmd_ok(s);
 +        return;
-+
-+    case GPCMD_FLUSH_CACHE:    // bigger timeout while flushing write cache
++    case GPCMD_FLUSH_CACHE:
++        /* bigger timeout while flushing write cache */
 +        as->timeout = 1000 * 60;
 +        break;
-+
-+    case GPCMD_SEND_OPC:    // bigger timeout while sending OPC
++    case GPCMD_SEND_OPC:
++        /* bigger timeout while sending OPC */
 +        as->timeout = 1000 * 60;
 +        break;
-+
-+    case GPCMD_FORMAT_UNIT:    // bigger timeout while formatting
-+        if ((s->io_buffer[1] & 2) == 0) {    // and only if Immed bit not set
++    case GPCMD_FORMAT_UNIT:
++        /* bigger timeout while formatting if Immed bit not set */
++        if ((s->io_buffer[1] & 2) == 0) {
 +            as->timeout = 1000 * 60 * 20;
 +        }
 +        /* If Format Code == 7 the drive expects 4 more bytes.
@@ -2999,50 +3214,43 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            as->dout_xfer_len += 4;
 +        }
 +        break;
-+
-+    case GPCMD_BLANK:    // bigger timeout while blanking
-+        as->timeout = 1000 * 60 * 80;    // 80 mins
++    case GPCMD_BLANK:
++        /* 80 mins timeout while blanking */
++        as->timeout = 1000 * 60 * 80;
 +        break;
-+
 +    case GPCMD_CLOSE_TRACK:
-+        as->timeout = 1000 * 60 * 5;    // 5 mins
++        /* 5 mins timeout */
++        as->timeout = 1000 * 60 * 5;
 +        break;
-+
 +    case GPCMD_WRITE_BUFFER:
 +        if ((s->io_buffer[1] & 7) != 0 &&    /* Combined header and data mode */
 +            (s->io_buffer[1] & 7) != 2) {    /* Data mode */
 +            atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                       ASC_INV_FIELD_IN_CMD_PACKET, 0,
-+                       0x70);
-+            ATAPI_DPRINTF
-+                ("Illegal request(%s): invalid field in CMD Packet",
-+                 atapi_cmd_to_str(cmd_code));
++                               ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
++            PT_LOG("illegal request (%s): invalid field in command packet\n",
++                   atapi_cmd_to_str(cmd_code));
 +            return;
 +        }
 +        break;
-+
-+    case GPCMD_WRITE_10:    // bigger timout while writing
++    case GPCMD_WRITE_10:
++        /* bigger timout while writing */
 +        as->timeout = 1000 * 60;
 +        break;
-+
 +    case GPCMD_READ_CD:
-+        // We read blocks, not bytes
++        /* We read blocks, not bytes */
 +        block_size = atapi_pt_read_cd_block_size(s->io_buffer);
 +        if (block_size < 0) {
 +            atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                       ASC_INV_FIELD_IN_CMD_PACKET, 0,
-+                       0x70);
-+            ATAPI_DPRINTF
-+                ("Illegal request(%s): read a not handled field",
-+                 atapi_cmd_to_str(cmd_code));
++                               ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
++            PT_LOG("illegal request (%s): read a not handled field\n",
++                   atapi_cmd_to_str(cmd_code));
 +            return;
 +        }
 +        as->din_xfer_len *= block_size;
 +        break;
-+
 +    case GPCMD_READ_CD_MSF:
 +        {
-+            // command fields
++            /* command fields */
 +            int starting_frame =
 +                MSF_TO_FRAMES(s->io_buffer[3], s->io_buffer[4],
 +                      s->io_buffer[5]);
@@ -3054,11 +3262,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            block_size = atapi_pt_read_cd_block_size(s->io_buffer);
 +            if (block_size < 0) {
 +                atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                           ASC_INV_FIELD_IN_CMD_PACKET,
-+                           0, 0x70);
-+                ATAPI_DPRINTF
-+                    ("Illegal request(%s): read a not handled frame field",
-+                     atapi_cmd_to_str(cmd_code));
++                                   ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
++                PT_LOG("illegal request (%s): read a not handled frame field\n",
++                       atapi_cmd_to_str(cmd_code));
 +                return;
 +            }
 +            as->din_xfer_len = block_count * block_size;
@@ -3067,72 +3273,68 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +    case GPCMD_PLAY_AUDIO_MSF:
 +        {
-+            int starting_frame =
-+                MSF_TO_FRAMES(s->io_buffer[3], s->io_buffer[4],
-+                      s->io_buffer[5]);
-+            int ending_frame =
-+                MSF_TO_FRAMES(s->io_buffer[6], s->io_buffer[7],
-+                      s->io_buffer[8]);
++            int starting_frame = MSF_TO_FRAMES(s->io_buffer[3], s->io_buffer[4],
++                                               s->io_buffer[5]);
++            int ending_frame = MSF_TO_FRAMES(s->io_buffer[6], s->io_buffer[7],
++                                             s->io_buffer[8]);
 +            int block_count = ending_frame - starting_frame;
 +            as->din_xfer_len = block_count * CD_FRAMESIZE;
 +            break;
 +        }
 +
 +    case GPCMD_GET_PERFORMANCE:
-+        // din_xfer_len is currently the max number of descriptors
-+        switch (s->io_buffer[10]) {
-+        case 0:    // performance
-+            if ((s->io_buffer[1] & 3) == 0) {    // nominal performance, 16 byte descriptors
++        /* din_xfer_len is currently the max number of descriptors */
++        switch (s->io_buffer[10])
++        {
++            case 0:    // performance
++                if ((s->io_buffer[1] & 3) == 0) {
++                    /* nominal performance, 16 byte descriptors */
++                    as->din_xfer_len *= 16;
++                } else {
++                    /* exceptions, 6 byte descriptors */
++                    as->din_xfer_len *= 6;
++                }
++                break;
++            case 1:                          // unusable area
++                /* 8 byte descriptors */
++                as->din_xfer_len *= 8;
++                break;
++            case 2:                          // defect status
++                /* 2048 byte descriptors */
++                as->din_xfer_len *= 2048;
++                break;
++            case 3:                          // write speed
++                /* 16 byte descriptors */
 +                as->din_xfer_len *= 16;
-+            } else {    // exceptions, 6 byte descriptors
-+                as->din_xfer_len *= 6;
-+            }
-+            break;
-+
-+        case 1:    // unusable area
-+            as->din_xfer_len *= 8;    // 8 byte descriptors
-+            break;
-+
-+        case 2:    // defect status
-+            as->din_xfer_len *= 2048;    // 2048 byte descriptors
-+            break;
-+
-+        case 3:    // write speed
-+            as->din_xfer_len *= 16;    // 16 byte descriptors
-+            break;
-+
-+        case 4:    // DBI data
-+            as->din_xfer_len *= 8;    // 8 byte descriptors
-+            break;
-+
-+        default:
-+            atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                       ASC_INV_FIELD_IN_CMD_PACKET, 0,
-+                       0x70);
-+            ATAPI_DPRINTF
-+                ("Illegal request(%s): bad field in CMD Packet",
-+                 atapi_cmd_to_str(cmd_code));
-+            return;
++                break;
++            case 4:                          // DBI data
++                /* 8 byte descriptors */
++                as->din_xfer_len *= 8;
++                break;
++            default:
++                atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
++                                   ASC_INV_FIELD_IN_CMD_PACKET, 0, 0x70);
++                PT_LOG("illegal request (%s): bad field in command packet",
++                       atapi_cmd_to_str(cmd_code));
++                return;
 +        }
-+
-+        as->din_xfer_len += 8;    // 8 bytes of header
++        /* 8 bytes of header */
++        as->din_xfer_len += 8;
 +        break;
-+
 +    case GPCMD_LOAD_UNLOAD:
 +        break;
 +    default:
 +        break;
 +    }
 +
-+    /* Clear sense data */
++    /* clear sense data */
 +    memset(&as->sense, 0, sizeof(as->sense));
 +
-+    if (as->dout_xfer_len == (__u32) - 1) {
++    if (as->dout_xfer_len == (__u32) -1) {
 +        atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
-+                   ASC_ILLEGAL_OPCODE, 0, 0x70);
-+        ATAPI_DPRINTF
-+            ("Illegal request(%s): illegal opcode (dout_xfer_len == -1)",
-+             atapi_cmd_to_str(cmd_code));
++                           ASC_ILLEGAL_OPCODE, 0, 0x70);
++        PT_LOG("illegal request (%s): illegal opcode (dout_xfer_len == -1)\n",
++               atapi_cmd_to_str(cmd_code));
 +        return;
 +    }
 +
