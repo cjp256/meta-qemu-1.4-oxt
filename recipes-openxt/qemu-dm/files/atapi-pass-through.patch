@@ -1519,7 +1519,7 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-26 18:00:46.081965648 -0400
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-26 18:04:34.277969932 -0400
 @@ -0,0 +1,1914 @@
 +/*
 + * ATAPI guest commands translation.
@@ -2766,7 +2766,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    s->atapipts = as;
 +
 +    /* disable notifications until guest is ready */
-+    as->allow_notifications = true;
++    as->allow_notifications = false;
 +
 +    /* register with backend */
 +    if (ptcmd_open(s->bs, s) != 0) {
