@@ -21,8 +21,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-24 17:48:05.742707295 -0400
-@@ -0,0 +1,1319 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-26 17:53:53.129957898 -0400
+@@ -0,0 +1,1358 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -71,6 +71,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +#include <block/atapi_pt_v4v.h>
 +
 +typedef struct AtapiPtDeviceInfo {
++    /* /dev/bsg/a:b:c:d */
 +    char device_path[256];
 +
 +    char xenstore_domain_base[256];
@@ -78,16 +79,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    char xenstore_bsgdevreq_base[256];
 +    char xenstore_global_base[256];
 +
++    /* a:b:c:d */
 +    int device_addr_a;
 +    int device_addr_b;
 +    int device_addr_c;
 +    int device_addr_d;
 +
-+    //IDEState *s;
-+    bool notify_eject_request;
-+    bool notify_media_removed;
-+    bool notify_new_media;
-+    bool notify_cd_change;
++    /* associated IDEState pointer */
++    void *ide_state;
 +
 +    /* xenstore-tied flags */
 +    int lock_state;
@@ -149,17 +148,6 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    }
 +}
 +
-+#if 0
-+static void queue_media_event(AtapiPtDeviceInfo *info, bool media_insert)
-+{
-+    info->notify_new_media = media_insert;
-+    info->notify_media_removed = !media_insert;
-+    info->notify_eject_request = !media_insert;
-+    info->notify_cd_change = media_insert ? 1 : 0;
-+    ide_set_irq(info->ide_state);
-+}
-+#endif
-+
 +/**
 + * Xenstore callback for global media state.
 + * @param[in] opaque: AtapiPtDeviceInfo *
@@ -173,8 +161,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        info->media_state = 0;
 +    }
 +
-+    PT_LOG("glob_mediastate_cb: media state change detected %s = %d\n",
++    PT_LOG("media state change detected %s = %d\n",
 +            info->device_path, info->media_state);
++
++    /* if autolock is enabled and media is ejected - release lock */
++    if (info->autolock && !info->media_state) {
++        info->assigned = 0;
++        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
++    }
 +}
 +
 +/**
@@ -191,7 +185,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        lock = -1;
 +    }
 +
-+    PT_LOG("lock_cb: lock change detected %s = %d\n", info->device_path, lock);
++    PT_LOG("lock change detected %s = %d\n", info->device_path, lock);
 +
 +    /* release the lock if we are losing assignment */
 +    if (lock == -1) {
@@ -207,13 +201,18 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +static void autolock_cb(void *opaque)
 +{
 +    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
++    int saved_autolock = info->autolock;
 +
-+    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "autolock", &info->autolock) != 0) {
++    if (xenstore_read_int(info->xenstore_bsgdevreq_base, "autolock",
++                          &info->autolock) != 0) {
 +        info->autolock = -1;
 +    }
 +
-+    PT_LOG("autolock_cb: autlock detected %s = %d\n", info->device_path,
-+                                                             info->autolock);
++    /* to reduce spurious autolock "changes", log only actual changes */
++    if (saved_autolock != info->autolock) {
++        PT_LOG("autolock change detected %s: %d->%d\n",
++               info->device_path, saved_autolock, info->autolock);
++    }
 +}
 +
 +/**
@@ -230,7 +229,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        info->have_focus = 0;
 +    }
 +
-+    PT_LOG("have_focus_cb: focus change detected %s = %d\n",
++    PT_LOG("focus change detected %s = %d\n",
 +            info->device_path, info->have_focus);
 +}
 +
@@ -249,9 +248,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return;
 +    }
 +
-+    PT_LOG("eject_req_cb: eject detected %s = %d\n", info->device_path, eject);
++    PT_LOG("eject request detected %s = %d\n", info->device_path, eject);
 +
 +    if (eject) {
++        info->assigned = 0;
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +
@@ -274,13 +274,22 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return;
 +    }
 +
-+    PT_LOG("assign_req_cb: assign detected %s = %d\n", info->device_path,
-+                                                           assign);
++    PT_LOG("assign_req_cb: assign detected %s = %d\n",
++           info->device_path, assign);
 +
 +    info->assigned = assign;
 +
 +    if (assign) {
 +        bdrv_ioctl(info->bs, ATAPI_PT_ACQUIRE_LOCK, NULL);
++
++        /* print a warning if we fail to get lock after assignment */
++        if (info->lock_state != ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
++            PT_LOG("warning: device assigned but unable to grab lock for %s\n",
++                   info->device_path);
++            PT_LOG("autolock=%d media_state=%d lock_state=%d assigned=%d\n",
++                   info->autolock, info->media_state,
++                   info->lock_state, info->assigned);
++        }
 +    } else {
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
@@ -306,8 +315,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return true;
 +    }
 +
-+    /* if autolock is enabled, lockable only if we have focus */
-+    if (info->autolock && info->have_focus) {
++    /* if autolock is enabled, lockable only if we have focus & cd is present */
++    if (info->autolock && info->have_focus && info->media_state) {
 +       return true;
 +    }
 +
@@ -328,11 +337,6 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    if (xenstore_write_int(info->xenstore_global_base, "media",
 +                           info->media_state) != 0) {
 +        PT_LOG("failed to set media state\n");
-+    }
-+
-+    /* if autolock is enabled, release lock if media ejected */
-+    if (info->autolock && !media_present) {
-+       bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
 +}
 +
@@ -442,6 +446,12 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +                          "lock", &info->lock_state) != 0) {
 +        info->lock_state = 0;
 +    }
++
++    /* trigger assign callback in case we have already been issued assignment */
++    assign_req_cb(info);
++
++    PT_LOG("autolock=%d media_state=%d lock_state=%d assigned=%d\n",
++           info->autolock, info->media_state, info->lock_state, info->assigned);
 +
 +    return true;
 +}
@@ -634,6 +644,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        PT_LOG("locked by me: %s\n", pts->dev_info.device_path);
 +        pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_LOCKED_BY_ME;
 +        notify_xs_lock_state(&pts->dev_info, 1);
++
++        /* signal that medium changed */
++        atapi_pt_notify_medium_maybe_changed(pts->dev_info.ide_state);
 +        return 1;
 +    }
 +
@@ -667,6 +680,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    notify_xs_lock_state(&pts->dev_info, 0);
 +
++    /* signal that medium has ejected */
++    atapi_pt_notify_medium_ejected(pts->dev_info.ide_state);
++
 +    PT_LOG("released lock: %s\n", pts->dev_info.device_path);
 +}
 +
@@ -684,7 +700,15 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
 +    int ret = 0;
 +
-+    switch(req) {
++    switch(req)
++    {
++        case ATAPI_PT_OPEN:
++            PT_DEBUG("ATAPI_PT_OPEN: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
++            }
++            info->ide_state = buf;
++            break;
 +        case ATAPI_PT_SET_GLOB_MEDIA_STATE:
 +            PT_DEBUG("ATAPI_PT_SET_GLOB_MEDIA_STATE: %s\n", info->device_path);
 +            if (!buf) {
@@ -701,11 +725,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            break;
 +        case ATAPI_PT_ACQUIRE_LOCK:
 +            PT_DEBUG("ATAPI_PT_ACQUIRE_LOCK: %s\n", info->device_path);
-+            if (!buf) {
-+                return -ENOTSUP;
-+            }
 +            pt_local_acquire_global_lock(pts);
-+            *(uint32_t *)buf = info->lock_state;
++            if (buf) {
++                *(uint32_t *)buf = info->lock_state;
++            }
 +            break;
 +        case ATAPI_PT_RELEASE_LOCK:
 +            PT_DEBUG("ATAPI_PT_RELEASE_LOCK: %s\n", info->device_path);
@@ -975,7 +998,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return 0;
 +    }
 +
-+    PT_DEBUG("sending ATAPI_PTV4V_ACQUIRE_LOCK...\n");
++    PT_LOG("sending ATAPI_PTV4V_ACQUIRE_LOCK...\n");
 +
 +    request.cmd = ATAPI_PTV4V_ACQUIRE_LOCK;
 +    request.device_id = pts->device_id;
@@ -1006,8 +1029,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    if (pts->dev_info.lock_state == ATAPI_PT_LOCK_STATE_LOCKED_BY_ME) {
 +        notify_xs_lock_state(&pts->dev_info, 1);
++
++        /* signal that medium is changing */
++        atapi_pt_notify_medium_maybe_changed(pts->dev_info.ide_state);
 +        return 1;
 +    }
++
++    PT_LOG("warning: failed to grab lock for %s - lock_state = %d\n",
++           pts->dev_info.device_path, pts->dev_info.lock_state);
 +
 +    notify_xs_lock_state(&pts->dev_info, 0);
 +    return 0;
@@ -1040,6 +1069,9 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    pts->dev_info.lock_state = ATAPI_PT_LOCK_STATE_UNLOCKED;
 +    notify_xs_lock_state(&pts->dev_info, 0);
++
++    /* signal that medium is ejected */
++    atapi_pt_notify_medium_ejected(pts->dev_info.ide_state);
 +}
 +
 +
@@ -1266,7 +1298,15 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    BDRVStubdomPassThroughState *pts = bs->opaque;
 +    AtapiPtDeviceInfo *info = &pts->dev_info;
 +
-+    switch(req) {
++    switch(req)
++    {
++        case ATAPI_PT_OPEN:
++            PT_DEBUG("ATAPI_PT_OPEN: %s\n", info->device_path);
++            if (!buf) {
++                return -ENOTSUP;
++            }
++            info->ide_state = buf;
++            break;
 +        case ATAPI_PT_SET_GLOB_MEDIA_STATE:
 +            PT_DEBUG("ATAPI_PT_SET_GLOB_MEDIA_STATE: %s\n", info->device_path);
 +            if (!buf) {
@@ -1283,11 +1323,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +            break;
 +        case ATAPI_PT_ACQUIRE_LOCK:
 +            PT_DEBUG("ATAPI_PT_ACQUIRE_LOCK: %s\n", info->device_path);
-+            if (!buf) {
-+                return -ENOTSUP;
-+            }
 +            pt_v4v_acquire_global_lock(pts);
-+            *(uint32_t *)buf = info->lock_state;
++            if (buf) {
++                *(uint32_t *)buf = info->lock_state;
++            }
 +            break;
 +        case ATAPI_PT_RELEASE_LOCK:
 +            PT_DEBUG("ATAPI_PT_RELEASE_LOCK: %s\n", info->device_path);
@@ -1480,8 +1519,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-24 17:55:54.782716101 -0400
-@@ -0,0 +1,1864 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-26 18:00:46.081965648 -0400
+@@ -0,0 +1,1914 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1514,7 +1553,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +#include <block/atapi_pt_ioctl.h>
 +#include <block/atapi_pt_v4v.h>
 +
-+#define DEBUG_ATAPI_PT 1
++#define DEBUG_ATAPI_PT 0
 +
 +/**
 + * PT_LOG: information to always log (errors & important low-volume events)
@@ -2258,9 +2297,14 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    ide_atapi_pt_size_din    // size of din data
 +};
 +
++static int ptcmd_open(BlockDriverState *bs, IDEState *s)
++{
++    return bdrv_ioctl(bs, ATAPI_PT_OPEN, s);
++}
++
 +static bool ptcmd_get_global_media_lock(BlockDriverState *bs)
 +{
-+    uint32_t lock_state;
++    uint32_t lock_state = 0;
 +
 +    bdrv_ioctl(bs, ATAPI_PT_ACQUIRE_LOCK, &lock_state);
 +
@@ -2280,16 +2324,18 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +static bool ptcmd_get_global_media_state(BlockDriverState *bs)
 +{
 +    uint32_t media_present = 0;
++
 +    bdrv_ioctl(bs, ATAPI_PT_GET_GLOB_MEDIA_STATE, &media_present);
++
 +    return media_present ? true : false;
 +}
 +
-+static bool ptcmd_do_sg_io(BlockDriverState *bs, void *buf)
++static int ptcmd_do_sg_io(BlockDriverState *bs, void *buf)
 +{
 +    return bdrv_ioctl(bs, ATAPI_PT_SG_IO, buf);
 +}
 +
-+static bool ptcmd_do_sg_get_reserved_size(BlockDriverState *bs, void *buf)
++static int ptcmd_do_sg_get_reserved_size(BlockDriverState *bs, void *buf)
 +{
 +    return bdrv_ioctl(bs, ATAPI_PT_SG_GET_RESERVED_SIZE, buf);
 +}
@@ -2428,6 +2474,34 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    ide_set_irq(s->bus);
 +}
 +
++void atapi_pt_notify_medium_maybe_changed(void *opaque)
++{
++    IDEState *s = (IDEState *)opaque;
++    ATAPIPassThroughState *as = s->atapipts;
++
++    if (!as->allow_notifications) {
++        /* nothing to do if guest has not yet communicated to drive */
++        return;
++    }
++
++    PT_LOG("notifying guest that medium has (possibly) changed\n");
++    atapi_pt_set_error(s, UNIT_ATTENTION, ASC_MEDIUM_MAY_HAVE_CHANGED, 0, 0x70);
++}
++
++void atapi_pt_notify_medium_ejected(void *opaque)
++{
++    IDEState *s = (IDEState *)opaque;
++    ATAPIPassThroughState *as = s->atapipts;
++
++    if (!as->allow_notifications) {
++        /* nothing to do if guest has not yet communicated to drive */
++        return;
++    }
++
++    PT_LOG("notifying guest that medium has ejected\n");
++    atapi_pt_set_error(s, NOT_READY, ASC_MEDIUM_NOT_PRESENT, 0, 0x70);
++}
++
 +static int atapi_pt_do_dispatch(volatile IDEState *s)
 +{
 +    int r = 0;
@@ -2442,7 +2516,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    uint8_t request[ATAPI_PACKET_SIZE];
 +    ATAPIPassThroughState *as = s->atapipts;
 +
-+    PT_LOG("dispatch for %s\n", atapi_cmd_to_str(as->request[0]));
++    PT_DEBUG("dispatch for %s\n", atapi_cmd_to_str(as->request[0]));
 +
 +    memcpy(request, (void *)as->request, sizeof(request));
 +
@@ -2471,7 +2545,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            if ((as->request[0] == GPCMD_WRITE_10) ||
 +                (as->request[0] == GPCMD_WRITE_AND_VERIFY_10) ||
 +                (as->request[0] == GPCMD_READ_10)) {
-+                PT_LOG("'%s' total(%d) seg(%d:%d), remaining: %d\n",
++                PT_DEBUG("'%s' total(%d) seg(%d:%d), remaining: %d\n",
 +                       atapi_cmd_to_str(as->request[0]),
 +                       *req_len_p, segment, *cmd_len_p,
 +                       *req_len_p - seg_offset - *cmd_len_p);
@@ -2485,7 +2559,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +                len = *cmd_len_p / CD_FRAMESIZE;
 +                cpu_to_ube16(request + 7, len);
 +
-+                PT_LOG("adjust lba from %d to %d, length from %d to %d\n",
++                PT_DEBUG("adjust lba from %d to %d, length from %d to %d\n",
 +                       ube32_to_cpu((uint8_t *) as->request + 2), lba,
 +                       ube16_to_cpu((uint8_t *) as->request + 7), len);
 +            } else {
@@ -2500,7 +2574,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        seg_offset += *cmd_len_p;
 +
 +        if (cmd.timeout != 15000) {
-+            PT_LOG("timeout=%d msec\n", cmd.timeout);
++            PT_DEBUG("timeout=%d msec\n", cmd.timeout);
 +        }
 +
 +        if (!r) {
@@ -2517,9 +2591,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        } else {
 +            as->result = 0;
 +        }
-+        PT_LOG("ioctl=%d driver=%d transport=%d device=%d=\n",
++        PT_DEBUG("ioctl=%d driver=%d transport=%d device=%d=\n",
 +               r, cmd.driver_status, cmd.transport_status, cmd.device_status);
-+        PT_LOG("result=%d req_len=%d seg_offset=%d last_segment=%s\n",
++        PT_DEBUG("result=%d req_len=%d seg_offset=%d last_segment=%s\n",
 +               as->result, *req_len_p, seg_offset,
 +               (*req_len_p > seg_offset) ? "no" : "yes");
 +    } while ((!as->result) && (*req_len_p > seg_offset));
@@ -2691,6 +2765,16 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    memset(as, 0, sizeof(ATAPIPassThroughState));
 +    s->atapipts = as;
 +
++    /* disable notifications until guest is ready */
++    as->allow_notifications = true;
++
++    /* register with backend */
++    if (ptcmd_open(s->bs, s) != 0) {
++        PT_LOG("ptcmd_open failed: %s\n", strerror(errno));
++        g_free(as);
++        return -1;
++    }
++
 +    /* create event notifier */
 +    error = event_notifier_init(&as->e_cmd, 0 /* Do not activate it now */ );
 +    if (error != 0) {
@@ -2717,7 +2801,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +     * for USB drives where it is 120kb (less than the normal 128kb for some
 +     * reason)
 +     */
-+    if (ptcmd_do_sg_get_reserved_size(s->bs, &(as->max_xfer_len))) {
++    if (ptcmd_do_sg_get_reserved_size(s->bs, &(as->max_xfer_len)) != 0) {
 +        PT_LOG("SG_GET_RESERVED_SIZE failed: %s\n", strerror(errno));
 +        as->thread_continue = false;
 +        event_notifier_cleanup(&as->e_cmd);
@@ -3047,6 +3131,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    as->sense.asc = ASC_MEDIUM_NOT_PRESENT;
 +    as->sense.ascq = 0;
 +
++    PT_LOG("sending fake request sense\n");
 +    PT_DEBUG_SENSE(as->sense.sense_key, as->sense.asc, as->sense.ascq);
 +
 +    memcpy(s->io_buffer, &as->sense, sizeof(as->sense));
@@ -3083,7 +3168,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +                                0x00, 0x00, 0x00, 0x00,
 +                                0x00, 0x00, 0x00, 0x00};
 +
-+    PT_DEBUG("sending fake inquiry reply\n");
++    PT_LOG("sending fake inquiry reply\n");
 +
 +    memcpy(s->io_buffer, inquiry_data, sizeof(inquiry_data));
 +
@@ -3098,6 +3183,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    ATAPIPassThroughState *as = s->atapipts;
 +    uint8_t cmd_code;
 +    int block_size;
++
++    /* guest is communicating with drive - allow notifications */
++    as->allow_notifications = true;
 +
 +    memcpy(as->request, s->io_buffer, ATAPI_PACKET_SIZE);
 +    cmd_code = as->request[0];
@@ -3128,7 +3216,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            case GPCMD_REQUEST_SENSE:
 +                atapi_pt_fake_sense(s);
 +                return;
-+            /* XXX: the below were allowed through in ioemu patch */
++            /* XXX: the below were allowed through in ioemu patch :( */
 +            case GPCMD_GET_CONFIGURATION:
 +            case GPCMD_GET_EVENT_STATUS_NOTIFICATION:
 +            case GPCMD_TEST_UNIT_READY:
@@ -3138,6 +3226,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            case GPCMD_REPORT_KEY:
 +            case GPCMD_READ_CDVD_CAPACITY:
 +            case GPCMD_READ_FORMAT_CAPACITIES:
++                break;
 +            default:
 +                /* error with medium not present for commands requiring lock */
 +                PT_LOG("refusing command: 0x%02x (%s) dma=%d timeout=%u\n",
@@ -3349,8 +3438,8 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.h
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.h	2015-03-23 14:37:18.632870352 -0400
-@@ -0,0 +1,147 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.h	2015-03-26 17:59:16.801963951 -0400
+@@ -0,0 +1,150 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -3491,6 +3580,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.h
 +     * descriptor */
 +    EventNotifier        e_cmd;
 +    EventNotifier        e_ret;
++
++    /* flag to enable/disable disc notifications (guest is ready) */
++    bool allow_notifications;
 +} ATAPIPassThroughState;
 +
 +int32_t atapi_pt_init(IDEState *s);
@@ -3819,8 +3911,8 @@ Index: qemu-1.4.0/util/event_notifier-posix.c
 Index: qemu-1.4.0/include/block/atapi_pt_ioctl.h
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/include/block/atapi_pt_ioctl.h	2015-03-23 14:37:18.864870357 -0400
-@@ -0,0 +1,34 @@
++++ qemu-1.4.0/include/block/atapi_pt_ioctl.h	2015-03-25 15:47:53.236193930 -0400
+@@ -0,0 +1,37 @@
 +/*
 + *
 + * Copyright (C) 2015 Assured Information Security, Chris Patterson <pattersonc@ainfosec.com>
@@ -3853,6 +3945,9 @@ Index: qemu-1.4.0/include/block/atapi_pt_ioctl.h
 +    ATAPI_PT_GET_GLOB_MEDIA_STATE        = 0x05,
 +    ATAPI_PT_SET_GLOB_MEDIA_STATE        = 0x06,
 +} atapi_pt_ioctl_cmd_t;
++
++void atapi_pt_notify_medium_maybe_changed(void *opaque);
++void atapi_pt_notify_medium_ejected(void *opaque);
 +
 +#endif /* !_ATAPI_PT_IOCTL_H_ */
 Index: qemu-1.4.0/include/block/atapi_pt_v4v.h
