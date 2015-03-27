@@ -38,11 +38,11 @@ index 57c08d6..eaf8682 100644
 +    if (!option) {
 +        SPAWN_ADD_ARG (devmodel, "-cdrom");
 +        SPAWN_ADD_ARG (devmodel, "%s", devicepath);
-+    } else {
++    } else { char *ro="off"; if (!strcmp(option, "pt-ro-exclusive")) { ro = "on"; };
 +        SPAWN_ADD_ARG (devmodel, "-drive");
 +        SPAWN_ADD_ARG (devmodel,
-+                       "file=%s:%s,media=cdrom,if=atapi-pt,format=raw",
-+                       dm_agent_in_stubdom() ? "atapi-pt-v4v" : "atapi-pt-local", devicepath);
++                       "file=%s:%s,media=cdrom,if=atapi-pt,format=raw,readonly=%s",
++                       dm_agent_in_stubdom() ? "atapi-pt-v4v" : "atapi-pt-local", devicepath, ro);
  
 -    res = spawn_add_argument (devmodel, cdrom);
 +        free (option);

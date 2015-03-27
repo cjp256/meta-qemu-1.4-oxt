@@ -15,5 +15,5 @@ SRC_URI += " \
 "
 
 INC_PR="r500"
-PR = "${INC_PR}.11"
+PR = "${INC_PR}.12"
 

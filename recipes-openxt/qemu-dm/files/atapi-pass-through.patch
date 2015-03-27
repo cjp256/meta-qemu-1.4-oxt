@@ -21,8 +21,8 @@ Index: qemu-1.4.0/block/Makefile.objs
 Index: qemu-1.4.0/block/atapi-pt-posix.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-26 17:53:53.129957898 -0400
-@@ -0,0 +1,1358 @@
++++ qemu-1.4.0/block/atapi-pt-posix.c	2015-03-27 16:55:05.303513704 -0400
+@@ -0,0 +1,1391 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -95,10 +95,11 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    int autolock;
 +    int assigned;
 +
++    bool readonly;
 +    BlockDriverState *bs;
 +} AtapiPtDeviceInfo;
 +
-+#define DEBUG_PTPOSIX 0
++int pt_log_level = 0;
 +
 +/**
 + * PT_LOG: information to always log (errors & important low-volume events)
@@ -111,14 +112,23 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    } while (0)
 +
 +/**
-+ * PT_DEBUG: debug level bits
++ * PT_VERBOSE: verbose level
 + * @param fmt,... printf style arguments
 + */
-+#define PT_DEBUG(fmt, ...)                                         \
-+    do {                                                           \
-+        if (DEBUG_PTPOSIX)                                         \
-+            fprintf(stdout, "[%s:%s:%d] " fmt,                     \
-+                    __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);      \
++#define PT_VERBOSE(fmt, ...)                                           \
++    do {                                                               \
++        if (pt_log_level >= 1)                                         \
++            PT_LOG(fmt, ## __VA_ARGS__);                                  \
++    } while (0)
++
++/**
++ * PT_DEBUG: debug level
++ * @param fmt,... printf style arguments
++ */
++#define PT_DEBUG(fmt, ...)                                             \
++    do {                                                               \
++        if (pt_log_level >= 2)                                         \
++            PT_LOG(fmt, ## __VA_ARGS__);                                  \
 +    } while (0)
 +
 +typedef struct BDRVPosixPassThroughState {
@@ -169,6 +179,23 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        info->assigned = 0;
 +        bdrv_ioctl(info->bs, ATAPI_PT_RELEASE_LOCK, NULL);
 +    }
++}
++
++/**
++ * Xenstore callback for log level changes.
++ * @param[in] opaque: AtapiPtDeviceInfo *
++ */
++static void loglevel_cb(void *opaque)
++{
++    AtapiPtDeviceInfo *info = (AtapiPtDeviceInfo *) opaque;
++
++    if (xenstore_read_int(info->xenstore_global_base,
++                          "loglevel", &pt_log_level) != 0) {
++        pt_log_level = 0;
++    }
++
++    PT_LOG("loglevel change detected %s = %d\n",
++           info->device_path, pt_log_level);
 +}
 +
 +/**
@@ -394,12 +421,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +             info->device_addr_d);
 +
 +    /* register xenstore watches */
-+    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-eject", eject_req_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-eject",
++                            eject_req_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-assign", assign_req_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_bsgdevreq_base, "req-assign",
++                            assign_req_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
@@ -410,7 +439,14 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +        return false;
 +    }
 +
-+    if (!xenstore_add_watch(info->xenstore_global_base, "media", glob_mediastate_cb, info)) {
++    if (!xenstore_add_watch(info->xenstore_global_base, "media",
++                            glob_mediastate_cb, info)) {
++        PT_LOG("error: failed to register watch for %p\n", path);
++        return false;
++    }
++
++    if (!xenstore_add_watch(info->xenstore_global_base, "loglevel",
++                            loglevel_cb, info)) {
 +        PT_LOG("error: failed to register watch for %p\n", path);
 +        return false;
 +    }
@@ -449,6 +485,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* trigger assign callback in case we have already been issued assignment */
 +    assign_req_cb(info);
++    loglevel_cb(info);
 +
 +    PT_LOG("autolock=%d media_state=%d lock_state=%d assigned=%d\n",
 +           info->autolock, info->media_state, info->lock_state, info->assigned);
@@ -543,13 +580,11 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +    int fd;
 +    struct stat st;
 +
-+    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-local:", strlen("atapi-pt-local:")) != 0) {
-+        PT_DEBUG("pt_local_probe_device: not a pt local %s\n", filename);
++        PT_DEBUG("not a pt device %s\n", filename);
 +        return -1;
 +    }
 +
-+    /* skip past protocol */
 +    filename += strlen("atapi-pt-local:");
 +
 +    PT_DEBUG("probing: %s\n", filename);
@@ -588,19 +623,17 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +{
 +    BDRVPosixPassThroughState *pts = bs->opaque;
 +
-+    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-local:", strlen("atapi-pt-local:")) != 0) {
-+        PT_LOG("pt_local_open: not a pt local %s\n", filename);
++        PT_DEBUG("not a pt device %s\n", filename);
 +        return -1;
 +    }
 +
-+    /* skip past protocol */
 +    filename += strlen("atapi-pt-local:");
 +
 +    if (pt_local_open_device(bs, filename, flags, O_NONBLOCK | O_RDWR) != 0) {
 +        PT_LOG("failed to open device %s\n", filename);
 +        return -1;
-+     }
++    }
 +
 +    atapi_pt_device_info_init(&pts->dev_info, filename, bs);
 +
@@ -612,6 +645,8 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +          pts->dev_info.device_addr_d);
 +
 +    pts->lock_fd = open(pts->lock_file_name, O_RDWR | O_CREAT, 0666);
++
++    PT_LOG("opened: %s - readonly=%d\n", filename, bdrv_is_read_only(bs));
 +
 +    return 0;
 +}
@@ -933,14 +968,13 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-v4v:", strlen("atapi-pt-v4v:")) != 0) {
-+        PT_LOG("pt_v4v_open: not a pt local %s\n", filename);
++        PT_DEBUG("not a pt device %s\n", filename);
 +        return -1;
 +    }
 +
-+    /* skip past protocol */
 +    filename += strlen("atapi-pt-v4v:");
 +
-+    PT_LOG("pt_v4v_open: %s\n", filename);
++    PT_LOG("opened: %s - readonly=%d\n", filename, bdrv_is_read_only(bs));
 +
 +    atapi_pt_device_info_init(&pts->dev_info, filename, bs);
 +
@@ -960,11 +994,10 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 +
 +    /* check protocol */
 +    if (strncmp(filename, "atapi-pt-v4v:", strlen("atapi-pt-v4v:")) != 0) {
-+        PT_DEBUG("not a pt local %s\n", filename);
++        PT_DEBUG("not a pt device %s\n", filename);
 +        return -1;
 +    }
 +
-+    /* skip past protocol */
 +    filename += strlen("atapi-pt-v4v:");
 +
 +    /* try to open v4v device given filename */
@@ -1384,7 +1417,7 @@ Index: qemu-1.4.0/block/atapi-pt-posix.c
 Index: qemu-1.4.0/blockdev.c
 ===================================================================
 --- qemu-1.4.0.orig/blockdev.c	2015-03-23 14:37:17.400870330 -0400
-+++ qemu-1.4.0/blockdev.c	2015-03-23 14:37:18.820870356 -0400
++++ qemu-1.4.0/blockdev.c	2015-03-27 15:52:17.255442964 -0400
 @@ -33,6 +33,9 @@
      [IF_SD] = "sd",
      [IF_VIRTIO] = "virtio",
@@ -1413,7 +1446,7 @@ Index: qemu-1.4.0/blockdev.c
 +    if (IF_ATAPI_PT == type) {
 +        type = IF_IDE;
 +        atapi_pt = true;
-+        ro = 0;
++        //ro = 0;
 +    }
 +#endif
      max_devs = if_max_devs[type];
@@ -1439,6 +1472,20 @@ Index: qemu-1.4.0/blockdev.c
          break;
      case IF_SD:
      case IF_FLOPPY:
+@@ -600,7 +621,13 @@
+ 
+     if (media == MEDIA_CDROM) {
+         /* CDROM is fine for any interface, don't check.  */
++#ifdef CONFIG_ATAPI_PT
++        if (!atapi_pt) {
++#endif
+         ro = 1;
++#ifdef CONFIG_ATAPI_PT
++        }
++#endif
+     } else if (ro == 1) {
+         if (type != IF_SCSI && type != IF_VIRTIO && type != IF_FLOPPY &&
+             type != IF_NONE && type != IF_PFLASH) {
 Index: qemu-1.4.0/configure
 ===================================================================
 --- qemu-1.4.0.orig/configure	2015-03-23 14:37:17.400870330 -0400
@@ -1519,8 +1566,8 @@ Index: qemu-1.4.0/hw/ide/atapi.c
 Index: qemu-1.4.0/hw/ide/atapi_pt.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-26 18:04:34.277969932 -0400
-@@ -0,0 +1,1914 @@
++++ qemu-1.4.0/hw/ide/atapi_pt.c	2015-03-27 17:09:36.707530063 -0400
+@@ -0,0 +1,1923 @@
 +/*
 + * ATAPI guest commands translation.
 + *
@@ -1553,7 +1600,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +#include <block/atapi_pt_ioctl.h>
 +#include <block/atapi_pt_v4v.h>
 +
-+#define DEBUG_ATAPI_PT 0
++extern int pt_log_level;
 +
 +/**
 + * PT_LOG: information to always log (errors & important low-volume events)
@@ -1566,14 +1613,23 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    } while (0)
 +
 +/**
-+ * PT_DEBUG: debug level bits
++ * PT_VERBOSE: verbose level
 + * @param fmt,... printf style arguments
 + */
-+#define PT_DEBUG(fmt, ...)                                         \
-+    do {                                                           \
-+        if (DEBUG_ATAPI_PT)                                         \
-+            fprintf(stdout, "[%s:%s:%d] " fmt,                     \
-+                    __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);      \
++#define PT_VERBOSE(fmt, ...)                                           \
++    do {                                                               \
++        if (pt_log_level >= 1)                                         \
++            PT_LOG(fmt, ## __VA_ARGS__);                                  \
++    } while (0)
++
++/**
++ * PT_DEBUG: debug level
++ * @param fmt,... printf style arguments
++ */
++#define PT_DEBUG(fmt, ...)                                             \
++    do {                                                               \
++        if (pt_log_level >= 2)                                         \
++            PT_LOG(fmt, ## __VA_ARGS__);                                  \
 +    } while (0)
 +
 +/**
@@ -3176,6 +3232,9 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +
 +    /* clear sense data */
 +    memset(&as->sense, 0, sizeof(as->sense));
++
++    /* faked commands to drive - allow notifications */
++    as->allow_notifications = true;
 +}
 +
 +void atapi_pt_cmd(IDEState * s)
@@ -3183,9 +3242,6 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    ATAPIPassThroughState *as = s->atapipts;
 +    uint8_t cmd_code;
 +    int block_size;
-+
-+    /* guest is communicating with drive - allow notifications */
-+    as->allow_notifications = true;
 +
 +    memcpy(as->request, s->io_buffer, ATAPI_PACKET_SIZE);
 +    cmd_code = as->request[0];
@@ -3198,11 +3254,11 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    as->din_xfer_len = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
 +                                              cmd_code, as->request);
 +
-+    PT_DEBUG("sending command: 0x%02x (%s) dma=%d timeout=%u din=%d dout=%d\n",
++    PT_VERBOSE("sending command: 0x%02x (%s) dma=%d timeout=%u din=%d dout=%d\n",
 +           cmd_code, atapi_cmd_to_str(cmd_code), s->atapi_dma, as->timeout,
 +           as->din_xfer_len, as->dout_xfer_len);
 +
-+    if (DEBUG_ATAPI_PT) {
++    if (pt_log_level > 1) {
 +        atapi_pt_dump_hexa(as->request, ATAPI_PACKET_SIZE);
 +    }
 +
@@ -3243,8 +3299,8 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +    if (bdrv_is_read_only(s->bs) && atapi_pt_cmd_requires_write(cmd_code)) {
 +        atapi_pt_set_error(s, SENSE_ILLEGAL_REQUEST,
 +                           ASC_ILLEGAL_OPCODE, 0, 0x70);
-+        PT_LOG("error: unable to perform cmd=%s: readonly device\n",
-+               atapi_cmd_to_str(cmd_code));
++        PT_LOG("error: unable to perform cmd=%s: readonly device=%d\n",
++               atapi_cmd_to_str(cmd_code), bdrv_is_read_only(s->bs));
 +        return;
 +    }
 +
@@ -3260,7 +3316,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +        break;
 +    case GPCMD_REQUEST_SENSE:
 +        /* if we previously caught an error, report it */
-+        if (as->sense.error_code != 0) {
++        if (*(char *)(&as->sense) != 0) {
 +            int max_size = atapi_pt_get_data_size(ide_atapi_pt_size_buffer,
 +                                                  GPCMD_REQUEST_SENSE, as->request);
 +            int size = atapi_pt_get_data_size(ide_atapi_pt_size_din,
@@ -3274,7 +3330,7 @@ Index: qemu-1.4.0/hw/ide/atapi_pt.c
 +            ide_atapi_cmd_reply(s, size, max_size);
 +
 +            /* reported the error, now clear it */
-+            as->sense.error_code = 0;
++            *(char *)(&as->sense) = 0;
 +            return;
 +        }
 +    //case GPCMD_SET_STREAMING:
